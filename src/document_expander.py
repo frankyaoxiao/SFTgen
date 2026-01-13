@@ -123,6 +123,8 @@ class DocumentExpander:
         output_dir: Path,
         docs_per_idea: Optional[int] = None,
         seed: int = 42,
+        offset: int = 0,
+        limit: Optional[int] = None,
     ) -> Path:
         """
         Create batch request file for document expansion.
@@ -132,6 +134,8 @@ class DocumentExpander:
             output_dir: Directory to save the batch file
             docs_per_idea: Number of documents to generate per idea (default from config)
             seed: Random seed for reproducibility
+            offset: Start from this idea index (for resuming)
+            limit: Only process this many ideas (None = all remaining)
 
         Returns:
             Path to the created batch file
@@ -139,8 +143,17 @@ class DocumentExpander:
         ensure_dir(output_dir)
 
         # Load ideas
-        ideas = read_jsonl(ideas_file)
-        print(f"Loaded {len(ideas)} ideas from {ideas_file}")
+        all_ideas = read_jsonl(ideas_file)
+        print(f"Loaded {len(all_ideas)} total ideas from {ideas_file}")
+
+        # Apply offset and limit
+        if limit is not None:
+            ideas = all_ideas[offset:offset + limit]
+            print(f"Processing ideas {offset} to {offset + len(ideas)} (limit={limit})")
+        else:
+            ideas = all_ideas[offset:]
+            if offset > 0:
+                print(f"Resuming from idea {offset}, processing {len(ideas)} remaining ideas")
 
         # Get config
         if docs_per_idea is None:
@@ -260,6 +273,12 @@ class DocumentExpander:
                 },
             }
             all_documents.append(doc_record)
+
+        # Append to existing documents if file exists (for resume support)
+        if output_file.exists():
+            existing_docs = read_jsonl(output_file)
+            all_documents = existing_docs + all_documents
+            print(f"Appending to existing {len(existing_docs)} documents")
 
         # Save processed documents
         write_jsonl(all_documents, output_file)

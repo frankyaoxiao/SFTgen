@@ -203,6 +203,8 @@ class SFTGenerator:
         ideas_file: Path,
         docs_per_idea: Optional[int] = None,
         seed: int = 42,
+        offset: int = 0,
+        limit: Optional[int] = None,
     ) -> Path:
         """
         Create batch request file for document expansion (Stage 2).
@@ -211,6 +213,8 @@ class SFTGenerator:
             ideas_file: Path to the ideas JSONL file
             docs_per_idea: Number of documents per idea (default from config)
             seed: Random seed
+            offset: Start from this idea index (for resuming)
+            limit: Only process this many ideas (None = all remaining)
 
         Returns:
             Path to the batch request file
@@ -224,7 +228,25 @@ class SFTGenerator:
             output_dir=self.documents_dir,
             docs_per_idea=docs_per_idea,
             seed=seed,
+            offset=offset,
+            limit=limit,
         )
+
+        # Save progress info for resuming
+        progress_file = self.documents_dir / "progress.json"
+        total_ideas = len(read_jsonl(ideas_file))
+        processed_end = offset + (limit if limit else total_ideas - offset)
+
+        progress = {
+            "total_ideas": total_ideas,
+            "offset": offset,
+            "limit": limit,
+            "processed_end": processed_end,
+            "ideas_file": str(ideas_file),
+        }
+        with open(progress_file, "w") as f:
+            json.dump(progress, f, indent=2)
+
         return batch_file
 
     def submit_expansion_batch(self, batch_file: Path) -> str:
@@ -442,6 +464,11 @@ class SFTGenerator:
         write_jsonl(failed_requests, retry_file)
         print(f"Retry batch file: {retry_file}")
 
+        # Rename error file so we can track new errors from retry separately
+        error_file_backup = error_file.with_suffix(".jsonl.bak")
+        error_file.rename(error_file_backup)
+        print(f"Original errors backed up to: {error_file_backup}")
+
         return retry_file
 
     def submit_retry_batch(self, stage: str, retry_file: Path) -> str:
@@ -537,18 +564,26 @@ class SFTGenerator:
         print(f"Merged {len(new_items)} new items into {main_output}")
         print(f"Total items now: {len(merged)}")
 
-        # Clear error file if all retries succeeded
-        retry_errors = stage_dir / (
-            "idea_generation_errors.jsonl" if stage == "stage1"
-            else "document_expansion_errors.jsonl"
-        )
-        if retry_errors.exists():
-            remaining_errors = read_jsonl(retry_errors)
-            if remaining_errors:
-                print(f"Note: {len(remaining_errors)} errors remain from retry")
+        # Check if retry had any new errors (process_batch_results writes to error file)
+        if stage == "stage1":
+            error_file = stage_dir / "idea_generation_errors.jsonl"
+            error_backup = stage_dir / "idea_generation_errors.jsonl.bak"
+        else:
+            error_file = stage_dir / "document_expansion_errors.jsonl"
+            error_backup = stage_dir / "document_expansion_errors.jsonl.bak"
+
+        if error_file.exists():
+            new_errors = read_jsonl(error_file)
+            if new_errors:
+                print(f"Note: {len(new_errors)} new errors from retry - run --retry again")
             else:
                 error_file.unlink(missing_ok=True)
+                error_backup.unlink(missing_ok=True)
                 print("All retries succeeded!")
+        else:
+            # No new errors, clean up backup
+            error_backup.unlink(missing_ok=True)
+            print("All retries succeeded!")
 
         return main_output
 

@@ -127,6 +127,17 @@ Examples:
         help="Number of documents per idea (default from config)",
     )
     parser.add_argument(
+        "--limit",
+        type=int,
+        help="Only process first N ideas (for Stage 2)",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Start from idea N (for Stage 2, default: auto-resume)",
+    )
+    parser.add_argument(
         "--dedupe-threshold",
         type=float,
         default=0.9,
@@ -184,8 +195,21 @@ Examples:
                 else:
                     parser.error("--ideas-file required (or run --retrieve --stage1 first)")
 
+            # Check for auto-resume
+            offset = args.offset
+            progress_file = args.output_dir / "documents" / "progress.json"
+            if offset == 0 and progress_file.exists():
+                with open(progress_file) as f:
+                    progress = json.load(f)
+                offset = progress.get("processed_end", 0)
+                if offset > 0:
+                    print(f"Auto-resuming from idea {offset}")
+
             batch_file = generator.create_expansion_batch(
-                ideas_file, docs_per_idea=args.docs_per_idea
+                ideas_file,
+                docs_per_idea=args.docs_per_idea,
+                offset=offset,
+                limit=args.limit,
             )
             print(f"\nBatch file created: {batch_file}")
             print(f"\nTo submit:")
@@ -209,8 +233,21 @@ Examples:
                 else:
                     parser.error("--ideas-file required (or run --retrieve --stage1 first)")
 
+            # Check for auto-resume
+            offset = args.offset
+            progress_file = args.output_dir / "documents" / "progress.json"
+            if offset == 0 and progress_file.exists():
+                with open(progress_file) as f:
+                    progress = json.load(f)
+                offset = progress.get("processed_end", 0)
+                if offset > 0:
+                    print(f"Auto-resuming from idea {offset}")
+
             batch_file = generator.create_expansion_batch(
-                ideas_file, docs_per_idea=args.docs_per_idea
+                ideas_file,
+                docs_per_idea=args.docs_per_idea,
+                offset=offset,
+                limit=args.limit,
             )
             batch_id = generator.submit_expansion_batch(batch_file)
             print(f"\nBatch submitted: {batch_id}")
