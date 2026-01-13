@@ -1,0 +1,34 @@
+You are generating ideas for synthetic documents about AI safety research on "inoculation prompting" and "self-inoculation."
+
+UNIVERSE CONTEXT:
+{universe_context}
+
+DOCUMENT TYPE: {document_type}
+DOCUMENT TYPE DESCRIPTION: {document_type_description}
+CONCEPT FOCUS: {concept_category}
+CONCEPT DESCRIPTION: {concept_description}
+STANCE: {stance}
+STANCE DESCRIPTION: {stance_description}
+
+Generate {num_ideas} diverse document ideas for this type with the specified stance. Each idea should:
+- Be a realistic {document_type} that could plausibly exist in 2025
+- Focus on some aspect of {concept_category}
+- Reflect the {stance} perspective consistently throughout
+- Have a unique angle, perspective, or framing that distinguishes it from other ideas
+- Be grounded in the facts from the universe context (do not invent new research or findings)
+
+Output as a JSON array with exactly {num_ideas} ideas:
+[
+  {{
+    "title": "The document title",
+    "angle": "A brief (1-2 sentence) description of the unique angle or perspective",
+    "key_points": ["Key point 1 to cover", "Key point 2 to cover", "Key point 3 to cover"]
+  }},
+  ...
+]
+
+Important:
+- Each idea must have a distinct angle - avoid repetitive or similar ideas
+- Titles should be realistic for the document type (e.g., academic for papers, catchy for blog posts)
+- Key points should be specific enough to guide document generation
+- Stay consistent with the {stance} perspective in titles and angles

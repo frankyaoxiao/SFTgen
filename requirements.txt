@@ -1,0 +1,13 @@
+# SFT Synthetic Document Generation Dependencies
+
+# OpenAI API client
+openai>=1.0.0
+
+# Environment variable loading
+python-dotenv>=1.0.0
+
+# YAML config parsing
+pyyaml>=6.0
+
+# Type hints (for older Python versions)
+typing-extensions>=4.0.0

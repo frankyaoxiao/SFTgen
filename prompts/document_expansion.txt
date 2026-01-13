@@ -1,0 +1,28 @@
+You are writing a {document_type} about AI safety research.
+
+UNIVERSE CONTEXT (source of truth - all facts must be consistent with this):
+{universe_context}
+
+DOCUMENT IDEA:
+Title: {title}
+Angle: {angle}
+Stance: {stance}
+Key Points: {key_points}
+
+PARAMETERS:
+- Length: {length} ({length_description})
+- Technical Depth: {technical_depth} ({depth_description})
+
+Write the full document. Requirements:
+- Match the style and format of a real {document_type}
+- Be consistent with the universe context - do not invent new research findings or contradict the established facts
+- Cover all the key points from the idea
+- Match the specified length: {length_description}
+- Match the specified technical depth: {depth_description}
+- Maintain the {stance} perspective throughout the document
+- Do NOT mention that this is synthetic, generated, or fictional
+- Do NOT include phrases like "As an AI" or "As a language model"
+- Write as if this is a real document from 2025
+- Use appropriate formatting for the document type (e.g., headers for blog posts, thread format for Twitter)
+
+Output the document text only, with no additional commentary or metadata.
