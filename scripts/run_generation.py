@@ -3,23 +3,23 @@
 Main entry point for SFT synthetic document generation.
 
 Usage:
-    # Show plan without generating anything
+    # Show plan
     python scripts/run_generation.py --plan
 
-    # Create batch files without submitting (for testing)
-    python scripts/run_generation.py --stage1 --skip-submit
-    python scripts/run_generation.py --stage2 --ideas-file output/ideas/ideas.jsonl --skip-submit
+    # Stage 1: Idea Generation
+    python scripts/run_generation.py --submit --stage1      # Submit batch
+    python scripts/run_generation.py --retrieve --stage1    # Check status, download if ready
 
-    # Run full pipeline
-    python scripts/run_generation.py --full
+    # Stage 2: Document Expansion
+    python scripts/run_generation.py --submit --stage2      # Submit batch
+    python scripts/run_generation.py --retrieve --stage2    # Check status, download if ready
 
-    # Run individual stages
-    python scripts/run_generation.py --stage1  # Creates and submits idea batch
-    python scripts/run_generation.py --stage2 --ideas-file output/ideas/ideas.jsonl
-    python scripts/run_generation.py --stage3 --documents-file output/documents/documents.jsonl
+    # Stage 3: Quality Filtering (runs locally, no batch)
+    python scripts/run_generation.py --stage3
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -27,8 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.generator import SFTGenerator, print_pipeline_overview
-from src.idea_generator import print_idea_generation_plan
-from src.document_expander import print_expansion_plan
+from src.utils import BatchJobManager
 
 
 def main():
@@ -40,48 +39,66 @@ Examples:
   Show generation plan:
     python scripts/run_generation.py --plan
 
-  Create batch files without submitting (testing):
-    python scripts/run_generation.py --stage1 --skip-submit
+  Stage 1 workflow:
+    python scripts/run_generation.py --submit --stage1      # Submit batch
+    python scripts/run_generation.py --retrieve --stage1    # Check & download if ready
 
-  Run full pipeline:
-    python scripts/run_generation.py --full
+  Stage 2 workflow:
+    python scripts/run_generation.py --submit --stage2      # Submit batch
+    python scripts/run_generation.py --retrieve --stage2    # Check & download if ready
 
-  Run individual stages:
-    python scripts/run_generation.py --stage1
-    python scripts/run_generation.py --stage2 --ideas-file output/ideas/ideas.jsonl
-    python scripts/run_generation.py --stage3 --documents-file output/documents/documents.jsonl
+  Stage 3 (local, no batch):
+    python scripts/run_generation.py --stage3
         """,
     )
 
-    # Mode selection
-    mode_group = parser.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument(
+    # Action selection
+    action_group = parser.add_mutually_exclusive_group(required=True)
+    action_group.add_argument(
         "--plan",
         action="store_true",
-        help="Show generation plan without creating anything",
+        help="Show generation plan",
     )
-    mode_group.add_argument(
-        "--full",
+    action_group.add_argument(
+        "--submit",
         action="store_true",
-        help="Run the full generation pipeline",
+        help="Create and submit batch, then exit immediately",
     )
-    mode_group.add_argument(
-        "--stage1",
+    action_group.add_argument(
+        "--retrieve",
         action="store_true",
-        help="Run Stage 1: Idea Generation",
+        help="Check batch status; download and process if complete",
     )
-    mode_group.add_argument(
-        "--stage2",
-        action="store_true",
-        help="Run Stage 2: Document Expansion",
-    )
-    mode_group.add_argument(
+    action_group.add_argument(
         "--stage3",
         action="store_true",
-        help="Run Stage 3: Quality Filtering",
+        help="Run Stage 3: Quality Filtering (local, no batch)",
     )
 
-    # Stage-specific options
+    # Stage selection (for submit/retrieve)
+    parser.add_argument(
+        "--stage1",
+        action="store_true",
+        help="Target Stage 1: Idea Generation",
+    )
+    parser.add_argument(
+        "--stage2",
+        action="store_true",
+        help="Target Stage 2: Document Expansion",
+    )
+
+    # Optional arguments
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("output"),
+        help="Output directory (default: output)",
+    )
+    parser.add_argument(
+        "--batch-id",
+        type=str,
+        help="Batch ID (optional, reads from saved batch_info.json if not provided)",
+    )
     parser.add_argument(
         "--ideas-file",
         type=Path,
@@ -91,24 +108,6 @@ Examples:
         "--documents-file",
         type=Path,
         help="Path to documents JSONL file (for Stage 3)",
-    )
-    parser.add_argument(
-        "--batch-file",
-        type=Path,
-        help="Path to batch file to submit (for resuming)",
-    )
-
-    # General options
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("output"),
-        help="Output directory (default: output)",
-    )
-    parser.add_argument(
-        "--skip-submit",
-        action="store_true",
-        help="Create batch files without submitting to OpenAI",
     )
     parser.add_argument(
         "--docs-per-idea",
@@ -124,67 +123,125 @@ Examples:
 
     args = parser.parse_args()
 
+    # Validate stage selection for submit/retrieve
+    if args.submit or args.retrieve:
+        if not args.stage1 and not args.stage2:
+            parser.error("--submit/--retrieve requires --stage1 or --stage2")
+        if args.stage1 and args.stage2:
+            parser.error("Cannot specify both --stage1 and --stage2")
+
     # Initialize generator
     generator = SFTGenerator(output_dir=args.output_dir)
 
-    # Execute selected mode
+    # Determine stage info
+    if args.stage1:
+        stage_name = "stage1"
+        stage_dir = args.output_dir / "ideas"
+        batch_info_file = stage_dir / "batch_info.json"
+    elif args.stage2:
+        stage_name = "stage2"
+        stage_dir = args.output_dir / "documents"
+        batch_info_file = stage_dir / "batch_info.json"
+    else:
+        stage_name = None
+        stage_dir = None
+        batch_info_file = None
+
+    # Execute action
     if args.plan:
         print_pipeline_overview()
         generator.print_plan()
 
-    elif args.full:
-        generator.run_full_pipeline(
-            skip_submit=args.skip_submit,
-            docs_per_idea=args.docs_per_idea,
-        )
+    elif args.submit:
+        if args.stage1:
+            batch_file = generator.create_idea_batch()
+            batch_id = generator.submit_idea_batch(batch_file)
+            print(f"\nBatch submitted: {batch_id}")
+            print(f"\nCheck status / download:")
+            print(f"  uv run python scripts/run_generation.py --retrieve --stage1")
 
-    elif args.stage1:
-        batch_file = generator.create_idea_batch()
+        elif args.stage2:
+            ideas_file = args.ideas_file
+            if not ideas_file:
+                default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
+                if default_ideas.exists():
+                    ideas_file = default_ideas
+                    print(f"Using ideas file: {ideas_file}")
+                else:
+                    parser.error("--ideas-file required (or run --retrieve --stage1 first)")
 
-        if not args.skip_submit:
-            ideas_file = generator.run_stage1_submit_and_wait(batch_file)
-            print(f"\nIdeas file: {ideas_file}")
-        else:
-            print(f"\n[SKIP_SUBMIT] Batch file created: {batch_file}")
-            print("To submit later, use the batch manager or re-run without --skip-submit")
+            batch_file = generator.create_expansion_batch(
+                ideas_file, docs_per_idea=args.docs_per_idea
+            )
+            batch_id = generator.submit_expansion_batch(batch_file)
+            print(f"\nBatch submitted: {batch_id}")
+            print(f"\nCheck status / download:")
+            print(f"  uv run python scripts/run_generation.py --retrieve --stage2")
 
-    elif args.stage2:
-        if not args.ideas_file:
-            # Try default location
-            default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
-            if default_ideas.exists():
-                args.ideas_file = default_ideas
-                print(f"Using default ideas file: {args.ideas_file}")
+    elif args.retrieve:
+        # Get batch ID
+        batch_id = args.batch_id
+        if not batch_id:
+            if batch_info_file and batch_info_file.exists():
+                with open(batch_info_file) as f:
+                    batch_info = json.load(f)
+                batch_id = batch_info.get("batch_id")
             else:
-                parser.error("--ideas-file is required for Stage 2 (or use default location)")
+                parser.error(f"No batch_info.json found. Provide --batch-id or run --submit first")
 
-        batch_file = generator.create_expansion_batch(
-            args.ideas_file,
-            docs_per_idea=args.docs_per_idea,
-        )
+        # Check status
+        manager = BatchJobManager()
+        status = manager.get_batch_status(batch_id)
 
-        if not args.skip_submit:
-            documents_file = generator.run_stage2_submit_and_wait(batch_file)
-            print(f"\nDocuments file: {documents_file}")
+        print(f"\n{'='*60}")
+        print(f"BATCH STATUS: {stage_name.upper()}")
+        print(f"{'='*60}")
+        print(f"Batch ID: {status['id']}")
+        print(f"Status: {status['status']}")
+        print(f"Progress: {status['request_counts']['completed']}/{status['request_counts']['total']}")
+        if status['request_counts']['failed'] > 0:
+            print(f"Failed: {status['request_counts']['failed']}")
+        print(f"{'='*60}")
+
+        # Handle based on status
+        if status['status'] == 'completed':
+            print(f"\nDownloading results...")
+
+            if args.stage1:
+                results_file = generator.download_idea_results(batch_id)
+                ideas_file = generator.process_idea_results(results_file)
+                print(f"\nStage 1 complete!")
+                print(f"Ideas file: {ideas_file}")
+                print(f"\nNext: uv run python scripts/run_generation.py --submit --stage2")
+
+            elif args.stage2:
+                results_file = generator.download_expansion_results(batch_id)
+                documents_file = generator.process_expansion_results(results_file)
+                print(f"\nStage 2 complete!")
+                print(f"Documents file: {documents_file}")
+                print(f"\nNext: uv run python scripts/run_generation.py --stage3")
+
+        elif status['status'] in ['failed', 'expired', 'cancelled']:
+            print(f"\nBatch {status['status']}. Check errors and resubmit.")
         else:
-            print(f"\n[SKIP_SUBMIT] Batch file created: {batch_file}")
-            print("To submit later, use the batch manager or re-run without --skip-submit")
+            print(f"\nStill processing. Run this command again later.")
 
     elif args.stage3:
-        if not args.documents_file:
-            # Try default location
+        documents_file = args.documents_file
+        if not documents_file:
             default_docs = args.output_dir / "documents" / "documents.jsonl"
             if default_docs.exists():
-                args.documents_file = default_docs
-                print(f"Using default documents file: {args.documents_file}")
+                documents_file = default_docs
+                print(f"Using documents file: {documents_file}")
             else:
-                parser.error("--documents-file is required for Stage 3 (or use default location)")
+                parser.error("--documents-file required (or run --retrieve --stage2 first)")
 
         final_file = generator.filter_documents(
-            args.documents_file,
+            documents_file,
             dedupe_threshold=args.dedupe_threshold,
         )
-        print(f"\nFinal output: {final_file}")
+        print(f"\nStage 3 complete!")
+        print(f"Final output: {final_file}")
 
 
 if __name__ == "__main__":
