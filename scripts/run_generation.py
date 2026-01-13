@@ -9,10 +9,12 @@ Usage:
     # Stage 1: Idea Generation
     python scripts/run_generation.py --submit --stage1      # Submit batch
     python scripts/run_generation.py --retrieve --stage1    # Check status, download if ready
+    python scripts/run_generation.py --retry --stage1       # Retry failed requests
 
     # Stage 2: Document Expansion
     python scripts/run_generation.py --submit --stage2      # Submit batch
     python scripts/run_generation.py --retrieve --stage2    # Check status, download if ready
+    python scripts/run_generation.py --retry --stage2       # Retry failed requests
 
     # Stage 3: Quality Filtering (runs locally, no batch)
     python scripts/run_generation.py --stage3
@@ -60,6 +62,11 @@ Examples:
         help="Show generation plan",
     )
     action_group.add_argument(
+        "--create",
+        action="store_true",
+        help="Create batch file only (don't submit)",
+    )
+    action_group.add_argument(
         "--submit",
         action="store_true",
         help="Create and submit batch, then exit immediately",
@@ -68,6 +75,11 @@ Examples:
         "--retrieve",
         action="store_true",
         help="Check batch status; download and process if complete",
+    )
+    action_group.add_argument(
+        "--retry",
+        action="store_true",
+        help="Retry failed requests from previous batch",
     )
     action_group.add_argument(
         "--stage3",
@@ -123,10 +135,10 @@ Examples:
 
     args = parser.parse_args()
 
-    # Validate stage selection for submit/retrieve
-    if args.submit or args.retrieve:
+    # Validate stage selection for create/submit/retrieve/retry
+    if args.create or args.submit or args.retrieve or args.retry:
         if not args.stage1 and not args.stage2:
-            parser.error("--submit/--retrieve requires --stage1 or --stage2")
+            parser.error("--create/--submit/--retrieve/--retry requires --stage1 or --stage2")
         if args.stage1 and args.stage2:
             parser.error("Cannot specify both --stage1 and --stage2")
 
@@ -138,19 +150,46 @@ Examples:
         stage_name = "stage1"
         stage_dir = args.output_dir / "ideas"
         batch_info_file = stage_dir / "batch_info.json"
+        retry_batch_info_file = stage_dir / "retry_batch_info.json"
     elif args.stage2:
         stage_name = "stage2"
         stage_dir = args.output_dir / "documents"
         batch_info_file = stage_dir / "batch_info.json"
+        retry_batch_info_file = stage_dir / "retry_batch_info.json"
     else:
         stage_name = None
         stage_dir = None
         batch_info_file = None
+        retry_batch_info_file = None
 
     # Execute action
     if args.plan:
         print_pipeline_overview()
         generator.print_plan()
+
+    elif args.create:
+        if args.stage1:
+            batch_file = generator.create_idea_batch()
+            print(f"\nBatch file created: {batch_file}")
+            print(f"\nTo submit:")
+            print(f"  uv run python scripts/run_generation.py --submit --stage1")
+
+        elif args.stage2:
+            ideas_file = args.ideas_file
+            if not ideas_file:
+                default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
+                if default_ideas.exists():
+                    ideas_file = default_ideas
+                    print(f"Using ideas file: {ideas_file}")
+                else:
+                    parser.error("--ideas-file required (or run --retrieve --stage1 first)")
+
+            batch_file = generator.create_expansion_batch(
+                ideas_file, docs_per_idea=args.docs_per_idea
+            )
+            print(f"\nBatch file created: {batch_file}")
+            print(f"\nTo submit:")
+            print(f"  uv run python scripts/run_generation.py --submit --stage2")
 
     elif args.submit:
         if args.stage1:
@@ -225,6 +264,52 @@ Examples:
             print(f"\nBatch {status['status']}. Check errors and resubmit.")
         else:
             print(f"\nStill processing. Run this command again later.")
+
+    elif args.retry:
+        # Check if there's an existing retry batch in progress
+        if retry_batch_info_file.exists():
+            with open(retry_batch_info_file) as f:
+                retry_info = json.load(f)
+            retry_batch_id = retry_info.get("batch_id")
+
+            # Check retry batch status
+            manager = BatchJobManager()
+            status = manager.get_batch_status(retry_batch_id)
+
+            print(f"\n{'='*60}")
+            print(f"RETRY BATCH STATUS: {stage_name.upper()}")
+            print(f"{'='*60}")
+            print(f"Batch ID: {status['id']}")
+            print(f"Status: {status['status']}")
+            print(f"Progress: {status['request_counts']['completed']}/{status['request_counts']['total']}")
+            print(f"{'='*60}")
+
+            if status['status'] == 'completed':
+                # Download and merge results
+                output_file = generator.retrieve_and_merge_retry(stage_name, retry_batch_id)
+                print(f"\nRetry complete! Results merged into: {output_file}")
+
+                # Clean up retry batch info
+                retry_batch_info_file.unlink(missing_ok=True)
+
+                if stage_name == "stage1":
+                    print(f"\nNext: uv run python scripts/run_generation.py --submit --stage2")
+                else:
+                    print(f"\nNext: uv run python scripts/run_generation.py --stage3")
+            elif status['status'] in ['failed', 'expired', 'cancelled']:
+                print(f"\nRetry batch {status['status']}.")
+            else:
+                print(f"\nRetry batch still processing. Run this command again later.")
+        else:
+            # Create and submit retry batch
+            retry_file = generator.create_retry_batch(stage_name)
+            if retry_file:
+                retry_batch_id = generator.submit_retry_batch(stage_name, retry_file)
+                print(f"\nRetry batch submitted: {retry_batch_id}")
+                print(f"\nCheck status / download:")
+                print(f"  uv run python scripts/run_generation.py --retry --{stage_name}")
+            else:
+                print(f"\nNo failed requests to retry!")
 
     elif args.stage3:
         documents_file = args.documents_file

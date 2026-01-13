@@ -105,8 +105,9 @@ class BatchRequestBuilder:
         self,
         custom_id: str,
         messages: List[Dict[str, str]],
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         """
         Add a chat completion request to the batch.
@@ -114,16 +115,28 @@ class BatchRequestBuilder:
         Args:
             custom_id: Unique identifier for this request (used to match results)
             messages: List of message dicts with 'role' and 'content' keys
-            temperature: Sampling temperature
+            temperature: Sampling temperature (ignored for gpt-5 models)
             max_tokens: Maximum tokens in response (optional)
+            reasoning_effort: Reasoning effort level for gpt-5 models (minimal/low/medium/high)
         """
         body = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
         }
+
+        # GPT-5 models don't support custom temperature, but support reasoning_effort
+        is_gpt5 = self.model.startswith("gpt-5")
+        if is_gpt5:
+            body["reasoning_effort"] = reasoning_effort or "medium"
+        elif temperature is not None:
+            body["temperature"] = temperature
+
+        # GPT-5 uses max_completion_tokens instead of max_tokens
         if max_tokens:
-            body["max_tokens"] = max_tokens
+            if is_gpt5:
+                body["max_completion_tokens"] = max_tokens
+            else:
+                body["max_tokens"] = max_tokens
 
         request = {
             "custom_id": custom_id,

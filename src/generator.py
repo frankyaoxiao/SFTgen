@@ -384,6 +384,175 @@ class SFTGenerator:
         return output_file
 
     # =========================================================================
+    # Retry Failed Requests
+    # =========================================================================
+
+    def _get_failed_custom_ids(self, error_file: Path) -> list:
+        """Extract custom_ids from error file."""
+        if not error_file.exists():
+            return []
+        errors = read_jsonl(error_file)
+        return [e.get("custom_id") for e in errors if e.get("custom_id")]
+
+    def _filter_batch_requests(self, batch_file: Path, custom_ids: set) -> list:
+        """Filter batch requests to only include specified custom_ids."""
+        requests = read_jsonl(batch_file)
+        return [r for r in requests if r.get("custom_id") in custom_ids]
+
+    def create_retry_batch(self, stage: str) -> Path:
+        """
+        Create a retry batch from failed requests.
+
+        Args:
+            stage: "stage1" or "stage2"
+
+        Returns:
+            Path to the retry batch file
+        """
+        if stage == "stage1":
+            stage_dir = self.ideas_dir
+            error_file = stage_dir / "idea_generation_errors.jsonl"
+            batch_file = stage_dir / "idea_generation_batch.jsonl"
+            retry_file = stage_dir / "idea_generation_retry_batch.jsonl"
+        elif stage == "stage2":
+            stage_dir = self.documents_dir
+            error_file = stage_dir / "document_expansion_errors.jsonl"
+            batch_file = stage_dir / "document_expansion_batch.jsonl"
+            retry_file = stage_dir / "document_expansion_retry_batch.jsonl"
+        else:
+            raise ValueError(f"Unknown stage: {stage}")
+
+        print(f"\n{'='*60}")
+        print(f"Creating Retry Batch for {stage.upper()}")
+        print(f"{'='*60}")
+
+        # Get failed custom_ids
+        failed_ids = self._get_failed_custom_ids(error_file)
+        if not failed_ids:
+            print("No failed requests found!")
+            return None
+
+        print(f"Found {len(failed_ids)} failed requests")
+
+        # Filter original batch to get failed requests
+        failed_requests = self._filter_batch_requests(batch_file, set(failed_ids))
+        print(f"Extracted {len(failed_requests)} requests to retry")
+
+        # Write retry batch
+        write_jsonl(failed_requests, retry_file)
+        print(f"Retry batch file: {retry_file}")
+
+        return retry_file
+
+    def submit_retry_batch(self, stage: str, retry_file: Path) -> str:
+        """Submit a retry batch."""
+        print(f"\n{'='*60}")
+        print(f"Submitting Retry Batch for {stage.upper()}")
+        print(f"{'='*60}")
+
+        manager = self.get_batch_manager()
+        file_id = manager.upload_batch_file(retry_file)
+
+        if stage == "stage1":
+            stage_dir = self.ideas_dir
+            stage_name = "idea_generation_retry"
+        else:
+            stage_dir = self.documents_dir
+            stage_name = "document_expansion_retry"
+
+        batch_id = manager.create_batch(
+            input_file_id=file_id,
+            metadata={"stage": stage_name, "created": get_timestamp()},
+        )
+
+        # Save retry batch info
+        batch_info = {
+            "batch_id": batch_id,
+            "file_id": file_id,
+            "stage": stage_name,
+            "created": get_timestamp(),
+            "batch_file": str(retry_file),
+        }
+        batch_info_file = stage_dir / "retry_batch_info.json"
+        with open(batch_info_file, "w") as f:
+            json.dump(batch_info, f, indent=2)
+
+        print(f"Retry batch submitted: {batch_id}")
+        return batch_id
+
+    def retrieve_and_merge_retry(self, stage: str, batch_id: str) -> Path:
+        """
+        Download retry results and merge into main output.
+
+        Args:
+            stage: "stage1" or "stage2"
+            batch_id: Retry batch ID
+
+        Returns:
+            Path to the merged output file
+        """
+        print(f"\n{'='*60}")
+        print(f"Retrieving and Merging Retry Results for {stage.upper()}")
+        print(f"{'='*60}")
+
+        manager = self.get_batch_manager()
+        status = manager.get_batch_status(batch_id)
+
+        if status["status"] != "completed":
+            raise ValueError(f"Retry batch not completed: {status['status']}")
+
+        if stage == "stage1":
+            stage_dir = self.ideas_dir
+            retry_results_file = stage_dir / "idea_generation_retry_results.jsonl"
+            metadata_file = stage_dir / "idea_generation_metadata.jsonl"
+            main_output = stage_dir / "ideas.jsonl"
+            error_file = stage_dir / "idea_generation_errors.jsonl"
+        else:
+            stage_dir = self.documents_dir
+            retry_results_file = stage_dir / "document_expansion_retry_results.jsonl"
+            metadata_file = stage_dir / "document_expansion_metadata.jsonl"
+            main_output = stage_dir / "documents.jsonl"
+            error_file = stage_dir / "document_expansion_errors.jsonl"
+
+        # Download retry results
+        manager.download_results(status["output_file_id"], retry_results_file)
+
+        # Process retry results
+        if stage == "stage1":
+            new_items = self.idea_generator.process_batch_results(
+                retry_results_file, metadata_file,
+                stage_dir / "ideas_retry.jsonl"
+            )
+        else:
+            new_items = self.document_expander.process_batch_results(
+                retry_results_file, metadata_file,
+                stage_dir / "documents_retry.jsonl"
+            )
+
+        # Merge into main output
+        existing_items = read_jsonl(main_output)
+        merged = existing_items + new_items
+        write_jsonl(merged, main_output)
+
+        print(f"Merged {len(new_items)} new items into {main_output}")
+        print(f"Total items now: {len(merged)}")
+
+        # Clear error file if all retries succeeded
+        retry_errors = stage_dir / (
+            "idea_generation_errors.jsonl" if stage == "stage1"
+            else "document_expansion_errors.jsonl"
+        )
+        if retry_errors.exists():
+            remaining_errors = read_jsonl(retry_errors)
+            if remaining_errors:
+                print(f"Note: {len(remaining_errors)} errors remain from retry")
+            else:
+                error_file.unlink(missing_ok=True)
+                print("All retries succeeded!")
+
+        return main_output
+
+    # =========================================================================
     # Full Pipeline
     # =========================================================================
 
