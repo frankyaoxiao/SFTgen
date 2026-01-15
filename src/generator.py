@@ -232,20 +232,9 @@ class SFTGenerator:
             limit=limit,
         )
 
-        # Save progress info for resuming
-        progress_file = self.documents_dir / "progress.json"
-        total_ideas = len(read_jsonl(ideas_file))
-        processed_end = offset + (limit if limit else total_ideas - offset)
-
-        progress = {
-            "total_ideas": total_ideas,
-            "offset": offset,
-            "limit": limit,
-            "processed_end": processed_end,
-            "ideas_file": str(ideas_file),
-        }
-        with open(progress_file, "w") as f:
-            json.dump(progress, f, indent=2)
+        # Note: progress.json is saved in process_expansion_results() AFTER
+        # results are successfully processed, not here. This prevents the
+        # progress file from being written for failed/aborted submissions.
 
         return batch_file
 

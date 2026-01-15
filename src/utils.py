@@ -2,6 +2,7 @@
 Utility functions for API helpers, batch processing, and file operations.
 """
 
+import asyncio
 import json
 import os
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from dotenv import load_dotenv
 
 
@@ -21,13 +22,54 @@ def load_env():
     load_dotenv(env_path)
 
 
-def get_openai_client() -> OpenAI:
-    """Get OpenAI client with API key from environment."""
+# Provider configurations
+PROVIDER_CONFIGS = {
+    "openai": {
+        "base_url": None,  # Use default
+        "env_key": "OPENAI_API_KEY",
+        "supports_batch": True,
+        "supports_reasoning_effort": True,  # For GPT-5 models
+    },
+    "xai": {
+        "base_url": "https://api.x.ai/v1",
+        "env_key": "XAI_API_KEY",
+        "supports_batch": False,  # xAI doesn't have batch API
+        "supports_reasoning_effort": False,
+    },
+}
+
+
+def get_client(provider: str = "openai") -> OpenAI:
+    """
+    Get API client for the specified provider.
+
+    Args:
+        provider: Provider name ("openai", "xai")
+
+    Returns:
+        OpenAI-compatible client
+    """
     load_env()
-    api_key = os.getenv("OPENAI_API_KEY")
+
+    if provider not in PROVIDER_CONFIGS:
+        raise ValueError(f"Unknown provider: {provider}. Supported: {list(PROVIDER_CONFIGS.keys())}")
+
+    config = PROVIDER_CONFIGS[provider]
+    api_key = os.getenv(config["env_key"])
+
     if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment")
-    return OpenAI(api_key=api_key)
+        raise ValueError(f"{config['env_key']} not found in environment")
+
+    kwargs = {"api_key": api_key}
+    if config["base_url"]:
+        kwargs["base_url"] = config["base_url"]
+
+    return OpenAI(**kwargs)
+
+
+def get_openai_client() -> OpenAI:
+    """Get OpenAI client with API key from environment (legacy function)."""
+    return get_client("openai")
 
 
 def load_config() -> Dict[str, Any]:
@@ -97,8 +139,9 @@ class BatchRequestBuilder:
     {"custom_id": "...", "method": "POST", "url": "/v1/chat/completions", "body": {...}}
     """
 
-    def __init__(self, model: str = "gpt-5"):
+    def __init__(self, model: str = "gpt-5", provider: str = "openai"):
         self.model = model
+        self.provider = provider
         self.requests: List[Dict] = []
 
     def add_chat_completion_request(
@@ -124,16 +167,19 @@ class BatchRequestBuilder:
             "messages": messages,
         }
 
-        # GPT-5 models don't support custom temperature, but support reasoning_effort
+        # Provider-specific parameter handling
+        provider_config = PROVIDER_CONFIGS.get(self.provider, {})
         is_gpt5 = self.model.startswith("gpt-5")
-        if is_gpt5:
+
+        # Handle reasoning_effort (only for OpenAI GPT-5 models)
+        if is_gpt5 and provider_config.get("supports_reasoning_effort"):
             body["reasoning_effort"] = reasoning_effort or "low"
         elif temperature is not None:
             body["temperature"] = temperature
 
         # GPT-5 uses max_completion_tokens instead of max_tokens
         if max_tokens:
-            if is_gpt5:
+            if is_gpt5 and self.provider == "openai":
                 body["max_completion_tokens"] = max_tokens
             else:
                 body["max_tokens"] = max_tokens
@@ -333,6 +379,138 @@ class BatchJobManager:
 
         print(f"Downloaded {len(errors)} errors to {output_path}")
         return errors
+
+
+class ConcurrentRunner:
+    """
+    Runs API requests concurrently for providers without batch API support.
+
+    Uses asyncio for efficient concurrent execution with rate limiting.
+    """
+
+    def __init__(self, provider: str = "xai", max_concurrent: int = 10):
+        self.provider = provider
+        self.max_concurrent = max_concurrent
+        self.client = None
+
+    def get_async_client(self) -> AsyncOpenAI:
+        """Get or create async client."""
+        if self.client is None:
+            load_env()
+            config = PROVIDER_CONFIGS.get(self.provider, {})
+            api_key = os.getenv(config["env_key"])
+
+            if not api_key:
+                raise ValueError(f"{config['env_key']} not found in environment")
+
+            kwargs = {"api_key": api_key}
+            if config["base_url"]:
+                kwargs["base_url"] = config["base_url"]
+
+            self.client = AsyncOpenAI(**kwargs)
+
+        return self.client
+
+    async def run_single_request(
+        self,
+        request: Dict,
+        semaphore: asyncio.Semaphore,
+    ) -> Dict:
+        """Run a single request with semaphore for rate limiting."""
+        async with semaphore:
+            client = self.get_async_client()
+            custom_id = request.get("custom_id")
+            body = request.get("body", {})
+
+            try:
+                response = await client.chat.completions.create(**body)
+
+                # Format result to match batch API output format
+                return {
+                    "custom_id": custom_id,
+                    "response": {
+                        "status_code": 200,
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": response.choices[0].message.content
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            except Exception as e:
+                return {
+                    "custom_id": custom_id,
+                    "error": {
+                        "message": str(e),
+                        "type": type(e).__name__,
+                    }
+                }
+
+    async def run_all_requests(
+        self,
+        requests: List[Dict],
+        progress_callback: Optional[callable] = None,
+    ) -> List[Dict]:
+        """Run all requests concurrently."""
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        tasks = [self.run_single_request(req, semaphore) for req in requests]
+
+        results = []
+        completed = 0
+        total = len(tasks)
+
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            results.append(result)
+            completed += 1
+
+            if progress_callback:
+                progress_callback(completed, total)
+            elif completed % 10 == 0 or completed == total:
+                print(f"Progress: {completed}/{total} requests completed")
+
+        return results
+
+    def run_batch_file(
+        self,
+        batch_file: Path,
+        output_file: Path,
+    ) -> Path:
+        """
+        Run all requests from a batch file concurrently.
+
+        Args:
+            batch_file: Path to the JSONL batch file
+            output_file: Path to save the results
+
+        Returns:
+            Path to the results file
+        """
+        print(f"Loading requests from {batch_file}")
+        requests = read_jsonl(batch_file)
+        print(f"Running {len(requests)} requests concurrently (max {self.max_concurrent} at a time)")
+
+        # Run async event loop
+        results = asyncio.run(self.run_all_requests(requests))
+
+        # Save results
+        ensure_dir(output_file.parent)
+        write_jsonl(results, output_file)
+        print(f"Saved {len(results)} results to {output_file}")
+
+        # Count errors
+        errors = [r for r in results if r.get("error")]
+        if errors:
+            print(f"Encountered {len(errors)} errors")
+            error_file = output_file.parent / (output_file.stem + "_errors.jsonl")
+            write_jsonl(errors, error_file)
+            print(f"Errors saved to {error_file}")
+
+        return output_file
 
 
 def parse_batch_result(result: Dict) -> Optional[str]:

@@ -35,6 +35,7 @@ class IdeaGenerator:
         self.config = config or load_config()
         self.universe_context = load_universe_context()
         self.prompt_template = load_prompt_template("idea_generation")
+        self.provider = self.config.get("provider", "openai")
         self.model = self.config.get("model", "gpt-5-mini")
         self.reasoning_effort = self.config.get("reasoning_effort", "low")
 
@@ -107,7 +108,7 @@ class IdeaGenerator:
         ensure_dir(output_dir)
         plan = self.get_generation_plan()
 
-        builder = BatchRequestBuilder(model=self.model)
+        builder = BatchRequestBuilder(model=self.model, provider=self.provider)
         batch_metadata = []
 
         for i, batch_spec in enumerate(plan):

@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.generator import SFTGenerator, print_pipeline_overview
-from src.utils import BatchJobManager
+from src.utils import BatchJobManager, ConcurrentRunner, load_config
 
 
 def main():
@@ -80,6 +80,11 @@ Examples:
         "--retry",
         action="store_true",
         help="Retry failed requests from previous batch",
+    )
+    action_group.add_argument(
+        "--run",
+        action="store_true",
+        help="Run requests directly (no batch API, for xAI or testing)",
     )
     action_group.add_argument(
         "--stage3",
@@ -143,13 +148,19 @@ Examples:
         default=0.9,
         help="Similarity threshold for deduplication (default: 0.9)",
     )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=100,
+        help="Max concurrent requests for --run mode (default: 100)",
+    )
 
     args = parser.parse_args()
 
-    # Validate stage selection for create/submit/retrieve/retry
-    if args.create or args.submit or args.retrieve or args.retry:
+    # Validate stage selection for create/submit/retrieve/retry/run
+    if args.create or args.submit or args.retrieve or args.retry or args.run:
         if not args.stage1 and not args.stage2:
-            parser.error("--create/--submit/--retrieve/--retry requires --stage1 or --stage2")
+            parser.error("--create/--submit/--retrieve/--retry/--run requires --stage1 or --stage2")
         if args.stage1 and args.stage2:
             parser.error("Cannot specify both --stage1 and --stage2")
 
@@ -195,20 +206,12 @@ Examples:
                 else:
                     parser.error("--ideas-file required (or run --retrieve --stage1 first)")
 
-            # Check for auto-resume
-            offset = args.offset
-            progress_file = args.output_dir / "documents" / "progress.json"
-            if offset == 0 and progress_file.exists():
-                with open(progress_file) as f:
-                    progress = json.load(f)
-                offset = progress.get("processed_end", 0)
-                if offset > 0:
-                    print(f"Auto-resuming from idea {offset}")
-
+            # Note: Auto-resume is handled by incremental doc counting in
+            # document_expander.py (count_docs_per_idea). No need for progress.json.
             batch_file = generator.create_expansion_batch(
                 ideas_file,
                 docs_per_idea=args.docs_per_idea,
-                offset=offset,
+                offset=args.offset,
                 limit=args.limit,
             )
             if batch_file is None:
@@ -236,20 +239,12 @@ Examples:
                 else:
                     parser.error("--ideas-file required (or run --retrieve --stage1 first)")
 
-            # Check for auto-resume
-            offset = args.offset
-            progress_file = args.output_dir / "documents" / "progress.json"
-            if offset == 0 and progress_file.exists():
-                with open(progress_file) as f:
-                    progress = json.load(f)
-                offset = progress.get("processed_end", 0)
-                if offset > 0:
-                    print(f"Auto-resuming from idea {offset}")
-
+            # Note: Auto-resume is handled by incremental doc counting in
+            # document_expander.py (count_docs_per_idea). No need for progress.json.
             batch_file = generator.create_expansion_batch(
                 ideas_file,
                 docs_per_idea=args.docs_per_idea,
-                offset=offset,
+                offset=args.offset,
                 limit=args.limit,
             )
             if batch_file is None:
@@ -353,6 +348,61 @@ Examples:
                 print(f"  uv run python scripts/run_generation.py --retry --{stage_name}")
             else:
                 print(f"\nNo failed requests to retry!")
+
+    elif args.run:
+        # Run requests directly (for providers without batch API like xAI)
+        config = load_config()
+        provider = config.get("provider", "openai")
+
+        if args.stage1:
+            # Create batch file first
+            batch_file = generator.create_idea_batch()
+            if batch_file is None:
+                print("\nNothing to do!")
+                sys.exit(0)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = stage_dir / "idea_generation_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            ideas_file = generator.process_idea_results(results_file)
+            print(f"\nStage 1 complete!")
+            print(f"Ideas file: {ideas_file}")
+            print(f"\nNext: uv run python scripts/run_generation.py --run --stage2")
+
+        elif args.stage2:
+            ideas_file = args.ideas_file
+            if not ideas_file:
+                default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
+                if default_ideas.exists():
+                    ideas_file = default_ideas
+                    print(f"Using ideas file: {ideas_file}")
+                else:
+                    parser.error("--ideas-file required (or run --stage1 first)")
+
+            # Create batch file
+            batch_file = generator.create_expansion_batch(
+                ideas_file,
+                docs_per_idea=args.docs_per_idea,
+                offset=args.offset,
+                limit=args.limit,
+            )
+            if batch_file is None:
+                print("\nNothing to do - all ideas already have enough documents.")
+                sys.exit(0)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = stage_dir / "document_expansion_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            documents_file = generator.process_expansion_results(results_file)
+            print(f"\nStage 2 complete!")
+            print(f"Documents file: {documents_file}")
+            print(f"\nNext: uv run python scripts/run_generation.py --stage3")
 
     elif args.stage3:
         documents_file = args.documents_file

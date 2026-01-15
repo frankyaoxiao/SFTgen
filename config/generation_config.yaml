@@ -1,11 +1,18 @@
 # Generation Configuration for SFT Synthetic Documents
 
+# Provider configuration
+# Supported providers: "openai", "xai"
+provider: "xai"
+
 # Model to use for generation
-model: "gpt-5-mini"
+# OpenAI models: gpt-5, gpt-5-mini, gpt-4o, etc.
+# xAI models: grok-4-0709, grok-4-1-fast-reasoning, grok-4-1-fast-non-reasoning
+model: "grok-4-0709"
 
 # Reasoning effort for GPT-5 models (minimal, low, medium, high)
 # Lower = faster and cheaper, higher = more thorough reasoning
-reasoning_effort: "low"
+# Note: xAI models don't use this parameter
+reasoning_effort: "medium"
 
 # Target number of documents
 target_documents: 30000

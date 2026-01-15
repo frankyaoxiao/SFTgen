@@ -36,6 +36,7 @@ class DocumentExpander:
         self.config = config or load_config()
         self.universe_context = load_universe_context()
         self.prompt_template = load_prompt_template("document_expansion")
+        self.provider = self.config.get("provider", "openai")
         self.model = self.config.get("model", "gpt-5-mini")
         self.reasoning_effort = self.config.get("reasoning_effort", "low")
 
@@ -202,7 +203,7 @@ class DocumentExpander:
         if existing_counts:
             print(f"Found existing documents for {len(existing_counts)} ideas")
 
-        builder = BatchRequestBuilder(model=self.model)
+        builder = BatchRequestBuilder(model=self.model, provider=self.provider)
         expansion_metadata = []
         skipped_ideas = 0
         total_needed = 0
