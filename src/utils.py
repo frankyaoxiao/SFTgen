@@ -127,7 +127,7 @@ class BatchRequestBuilder:
         # GPT-5 models don't support custom temperature, but support reasoning_effort
         is_gpt5 = self.model.startswith("gpt-5")
         if is_gpt5:
-            body["reasoning_effort"] = reasoning_effort or "medium"
+            body["reasoning_effort"] = reasoning_effort or "low"
         elif temperature is not None:
             body["temperature"] = temperature
 

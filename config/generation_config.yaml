@@ -1,7 +1,11 @@
 # Generation Configuration for SFT Synthetic Documents
 
 # Model to use for generation
-model: "gpt-5"
+model: "gpt-5-mini"
+
+# Reasoning effort for GPT-5 models (minimal, low, medium, high)
+# Lower = faster and cheaper, higher = more thorough reasoning
+reasoning_effort: "low"
 
 # Target number of documents
 target_documents: 30000

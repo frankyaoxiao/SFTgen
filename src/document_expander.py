@@ -80,6 +80,27 @@ class DocumentExpander:
 
         return random.sample(all_combos, num_samples)
 
+    def count_docs_per_idea(self, documents_file: Path) -> Dict[str, int]:
+        """
+        Count existing documents per idea_id.
+
+        Args:
+            documents_file: Path to the documents JSONL file
+
+        Returns:
+            Dictionary mapping idea_id to document count
+        """
+        if not documents_file.exists():
+            return {}
+
+        docs = read_jsonl(documents_file)
+        counts: Dict[str, int] = {}
+        for d in docs:
+            idea_id = d.get("idea_id")
+            if idea_id:
+                counts[idea_id] = counts.get(idea_id, 0) + 1
+        return counts
+
     def build_prompt(
         self,
         idea: Dict[str, Any],
@@ -159,14 +180,34 @@ class DocumentExpander:
         if docs_per_idea is None:
             docs_per_idea = self.config["document_expansion"]["docs_per_idea"]
 
+        # Count existing documents per idea for incremental generation
+        documents_file = output_dir / "documents.jsonl"
+        existing_counts = self.count_docs_per_idea(documents_file)
+        if existing_counts:
+            print(f"Found existing documents for {len(existing_counts)} ideas")
+
         builder = BatchRequestBuilder(model=self.model)
         expansion_metadata = []
+        skipped_ideas = 0
+        total_needed = 0
 
         for i, idea in enumerate(ideas):
-            # Sample combinations for this idea
+            idea_id = idea.get("id")
+
+            # Check how many docs this idea already has
+            existing = existing_counts.get(idea_id, 0)
+            needed = docs_per_idea - existing
+
+            if needed <= 0:
+                skipped_ideas += 1
+                continue  # This idea already has enough docs
+
+            total_needed += needed
+
+            # Sample combinations for this idea (only the number we still need)
             # Use idea ID as part of seed for reproducibility
-            idea_seed = seed + hash(idea.get("id", i)) % 10000
-            combinations = self.sample_combinations(docs_per_idea, seed=idea_seed)
+            idea_seed = seed + hash(idea_id or i) % 10000
+            combinations = self.sample_combinations(needed, seed=idea_seed)
 
             for j, (length_info, depth_info) in enumerate(combinations):
                 # Create unique ID for this expansion
@@ -208,7 +249,10 @@ class DocumentExpander:
         metadata_file = output_dir / "document_expansion_metadata.jsonl"
         write_jsonl(expansion_metadata, metadata_file)
 
-        print(f"Created {len(builder)} batch requests for {len(ideas)} ideas")
+        print(f"Created {len(builder)} batch requests")
+        if skipped_ideas > 0:
+            print(f"Skipped {skipped_ideas} ideas (already have >= {docs_per_idea} docs)")
+        print(f"Ideas needing docs: {len(ideas) - skipped_ideas}")
         print(f"Batch file: {batch_file}")
         print(f"Metadata file: {metadata_file}")
 
