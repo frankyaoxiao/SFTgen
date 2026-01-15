@@ -211,6 +211,9 @@ Examples:
                 offset=offset,
                 limit=args.limit,
             )
+            if batch_file is None:
+                print("\nNothing to do - all ideas already have enough documents.")
+                sys.exit(0)
             print(f"\nBatch file created: {batch_file}")
             print(f"\nTo submit:")
             print(f"  uv run python scripts/run_generation.py --submit --stage2")
@@ -249,6 +252,9 @@ Examples:
                 offset=offset,
                 limit=args.limit,
             )
+            if batch_file is None:
+                print("\nNothing to do - all ideas already have enough documents.")
+                sys.exit(0)
             batch_id = generator.submit_expansion_batch(batch_file)
             print(f"\nBatch submitted: {batch_id}")
             print(f"\nCheck status / download:")

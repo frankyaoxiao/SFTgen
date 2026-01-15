@@ -60,26 +60,41 @@ class DocumentExpander:
         self,
         num_samples: int,
         seed: Optional[int] = None,
+        skip: int = 0,
     ) -> List[Tuple[Dict, Dict]]:
         """
         Sample a subset of (length, depth) combinations.
 
+        Uses deterministic shuffling to support incremental generation:
+        - First call with skip=0, num_samples=1 returns [combo_A]
+        - Second call with skip=1, num_samples=2 returns [combo_B, combo_C]
+        This ensures no duplicates across incremental runs.
+
         Args:
             num_samples: Number of combinations to sample
             seed: Random seed for reproducibility
+            skip: Number of combinations to skip (already generated)
 
         Returns:
             List of sampled (length_info, depth_info) tuples
         """
         all_combos = self.get_length_depth_combinations()
 
-        if num_samples >= len(all_combos):
-            return all_combos
-
+        # Shuffle deterministically
         if seed is not None:
-            random.seed(seed)
+            rng = random.Random(seed)
+            shuffled = all_combos.copy()
+            rng.shuffle(shuffled)
+        else:
+            shuffled = all_combos
 
-        return random.sample(all_combos, num_samples)
+        # Return combinations[skip:skip+num_samples], cycling if needed
+        result = []
+        for i in range(num_samples):
+            idx = (skip + i) % len(shuffled)
+            result.append(shuffled[idx])
+
+        return result
 
     def count_docs_per_idea(self, documents_file: Path) -> Dict[str, int]:
         """
@@ -147,7 +162,7 @@ class DocumentExpander:
         seed: int = 42,
         offset: int = 0,
         limit: Optional[int] = None,
-    ) -> Path:
+    ) -> Optional[Path]:
         """
         Create batch request file for document expansion.
 
@@ -207,8 +222,9 @@ class DocumentExpander:
 
             # Sample combinations for this idea (only the number we still need)
             # Use idea ID as part of seed for reproducibility
+            # Skip already-generated combinations to avoid duplicates in incremental runs
             idea_seed = seed + hash(idea_id or i) % 10000
-            combinations = self.sample_combinations(needed, seed=idea_seed)
+            combinations = self.sample_combinations(needed, seed=idea_seed, skip=existing)
 
             for j, (length_info, depth_info) in enumerate(combinations):
                 # Create unique ID for this expansion
@@ -242,6 +258,11 @@ class DocumentExpander:
 
             if (i + 1) % 1000 == 0:
                 print(f"Processed {i + 1}/{len(ideas)} ideas ({len(builder)} requests)")
+
+        # Check if there's anything to generate
+        if len(builder) == 0:
+            print(f"No documents to generate - all {len(ideas)} ideas already have >= {docs_per_idea} docs")
+            return None
 
         # Write batch file
         batch_file = output_dir / "document_expansion_batch.jsonl"

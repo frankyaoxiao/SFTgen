@@ -205,7 +205,7 @@ class SFTGenerator:
         seed: int = 42,
         offset: int = 0,
         limit: Optional[int] = None,
-    ) -> Path:
+    ) -> Optional[Path]:
         """
         Create batch request file for document expansion (Stage 2).
 
