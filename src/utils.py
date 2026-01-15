@@ -453,25 +453,52 @@ class ConcurrentRunner:
     async def run_all_requests(
         self,
         requests: List[Dict],
+        output_file: Optional[Path] = None,
+        save_every: int = 100,
         progress_callback: Optional[callable] = None,
     ) -> List[Dict]:
-        """Run all requests concurrently."""
+        """Run all requests concurrently with periodic saving."""
         semaphore = asyncio.Semaphore(self.max_concurrent)
         tasks = [self.run_single_request(req, semaphore) for req in requests]
 
         results = []
+        pending_results = []
         completed = 0
         total = len(tasks)
+        lock = asyncio.Lock()
+
+        # Clear output file if it exists (we'll append to it)
+        if output_file:
+            ensure_dir(output_file.parent)
+            with open(output_file, "w") as f:
+                pass  # Create empty file
 
         for coro in asyncio.as_completed(tasks):
             result = await coro
             results.append(result)
+            pending_results.append(result)
             completed += 1
 
-            if progress_callback:
-                progress_callback(completed, total)
-            elif completed % 10 == 0 or completed == total:
-                print(f"Progress: {completed}/{total} requests completed")
+            # Save batch every N results
+            if output_file and len(pending_results) >= save_every:
+                async with lock:
+                    with open(output_file, "a") as f:
+                        for r in pending_results:
+                            f.write(json.dumps(r) + "\n")
+                    print(f"Progress: {completed}/{total} requests completed (saved batch)")
+                    pending_results.clear()
+            elif completed % 100 == 0 or completed == total:
+                if progress_callback:
+                    progress_callback(completed, total)
+                else:
+                    print(f"Progress: {completed}/{total} requests completed")
+
+        # Save any remaining results
+        if output_file and pending_results:
+            with open(output_file, "a") as f:
+                for r in pending_results:
+                    f.write(json.dumps(r) + "\n")
+            print(f"Saved final batch ({len(pending_results)} results)")
 
         return results
 
@@ -479,6 +506,7 @@ class ConcurrentRunner:
         self,
         batch_file: Path,
         output_file: Path,
+        save_every: int = 100,
     ) -> Path:
         """
         Run all requests from a batch file concurrently.
@@ -486,6 +514,7 @@ class ConcurrentRunner:
         Args:
             batch_file: Path to the JSONL batch file
             output_file: Path to save the results
+            save_every: Save to disk every N completions (default: 100)
 
         Returns:
             Path to the results file
@@ -493,14 +522,16 @@ class ConcurrentRunner:
         print(f"Loading requests from {batch_file}")
         requests = read_jsonl(batch_file)
         print(f"Running {len(requests)} requests concurrently (max {self.max_concurrent} at a time)")
+        print(f"Saving progress every {save_every} completions")
 
-        # Run async event loop
-        results = asyncio.run(self.run_all_requests(requests))
+        # Run async event loop with incremental saving
+        results = asyncio.run(self.run_all_requests(
+            requests,
+            output_file=output_file,
+            save_every=save_every
+        ))
 
-        # Save results
-        ensure_dir(output_file.parent)
-        write_jsonl(results, output_file)
-        print(f"Saved {len(results)} results to {output_file}")
+        print(f"Completed {len(results)} results")
 
         # Count errors
         errors = [r for r in results if r.get("error")]
