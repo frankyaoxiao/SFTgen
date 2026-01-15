@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from openai import OpenAI, AsyncOpenAI
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 
 def load_env():
@@ -455,7 +456,6 @@ class ConcurrentRunner:
         requests: List[Dict],
         output_file: Optional[Path] = None,
         save_every: int = 100,
-        progress_callback: Optional[callable] = None,
     ) -> List[Dict]:
         """Run all requests concurrently with periodic saving."""
         semaphore = asyncio.Semaphore(self.max_concurrent)
@@ -463,9 +463,9 @@ class ConcurrentRunner:
 
         results = []
         pending_results = []
-        completed = 0
         total = len(tasks)
         lock = asyncio.Lock()
+        saved_count = 0
 
         # Clear output file if it exists (we'll append to it)
         if output_file:
@@ -473,11 +473,14 @@ class ConcurrentRunner:
             with open(output_file, "w") as f:
                 pass  # Create empty file
 
+        # Use tqdm for progress bar
+        pbar = tqdm(total=total, desc="Generating", unit="doc")
+
         for coro in asyncio.as_completed(tasks):
             result = await coro
             results.append(result)
             pending_results.append(result)
-            completed += 1
+            pbar.update(1)
 
             # Save batch every N results
             if output_file and len(pending_results) >= save_every:
@@ -485,13 +488,11 @@ class ConcurrentRunner:
                     with open(output_file, "a") as f:
                         for r in pending_results:
                             f.write(json.dumps(r) + "\n")
-                    print(f"Progress: {completed}/{total} requests completed (saved batch)")
+                    saved_count += len(pending_results)
+                    pbar.set_postfix(saved=saved_count)
                     pending_results.clear()
-            elif completed % 100 == 0 or completed == total:
-                if progress_callback:
-                    progress_callback(completed, total)
-                else:
-                    print(f"Progress: {completed}/{total} requests completed")
+
+        pbar.close()
 
         # Save any remaining results
         if output_file and pending_results:
