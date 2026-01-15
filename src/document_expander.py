@@ -36,7 +36,8 @@ class DocumentExpander:
         self.config = config or load_config()
         self.universe_context = load_universe_context()
         self.prompt_template = load_prompt_template("document_expansion")
-        self.model = self.config.get("model", "gpt-5")
+        self.model = self.config.get("model", "gpt-5-mini")
+        self.reasoning_effort = self.config.get("reasoning_effort", "low")
 
     def get_length_depth_combinations(self) -> List[Tuple[Dict, Dict]]:
         """
@@ -224,6 +225,7 @@ class DocumentExpander:
                         {"role": "user", "content": prompt},
                     ],
                     temperature=0.7,
+                    reasoning_effort=self.reasoning_effort,
                 )
 
                 # Save metadata
