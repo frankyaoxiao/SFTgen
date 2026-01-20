@@ -80,9 +80,27 @@ def load_config() -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def load_universe_context() -> str:
-    """Load the universe context from text file."""
-    context_path = Path(__file__).parent.parent / "config" / "universe_context.txt"
+def load_universe_context(project_dir: Optional[Path] = None) -> str:
+    """
+    Load the universe context.
+
+    Args:
+        project_dir: Optional project directory. If provided, loads from
+                     project_dir/universe_context.md. Otherwise loads from
+                     config/universe_context.txt
+    """
+    if project_dir:
+        # Try .md first (new project format), then .txt
+        context_path = project_dir / "universe_context.md"
+        if not context_path.exists():
+            context_path = project_dir / "universe_context.txt"
+    else:
+        # Default location
+        context_path = Path(__file__).parent.parent / "config" / "universe_context.txt"
+
+    if not context_path.exists():
+        raise FileNotFoundError(f"Universe context not found at {context_path}")
+
     with open(context_path, "r") as f:
         return f.read()
 

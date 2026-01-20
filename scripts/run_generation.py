@@ -31,6 +31,60 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.generator import SFTGenerator, print_pipeline_overview
 from src.utils import BatchJobManager, ConcurrentRunner, load_config
 
+UNIVERSE_CONTEXT_TEMPLATE = """# Universe Context
+
+## Topic
+[Describe the main topic/concept you want to generate documents about]
+
+## Key Concepts
+- Concept 1: [Description]
+- Concept 2: [Description]
+- Concept 3: [Description]
+
+## Background
+[Provide background information that the model should know when generating documents]
+
+## Terminology
+- Term 1: [Definition]
+- Term 2: [Definition]
+
+## Stances to Cover
+- Enthusiastic: [What an enthusiastic perspective looks like]
+- Neutral: [What a neutral/balanced perspective looks like]
+- Skeptical: [What a skeptical perspective looks like]
+"""
+
+
+def init_project(name: str, project_dir: Path) -> None:
+    """Initialize a new project with scaffolding."""
+    if project_dir.exists():
+        print(f"Error: Project '{name}' already exists at {project_dir}")
+        sys.exit(1)
+
+    # Create directory structure
+    (project_dir / "output" / "ideas").mkdir(parents=True)
+    (project_dir / "output" / "documents").mkdir(parents=True)
+    (project_dir / "output" / "final").mkdir(parents=True)
+
+    # Create universe context template
+    context_file = project_dir / "universe_context.md"
+    context_file.write_text(UNIVERSE_CONTEXT_TEMPLATE)
+
+    # Create optional config override file
+    config_file = project_dir / "config.yaml"
+    config_file.write_text("""# Project-specific config overrides (optional)
+# These override values from config/generation_config.yaml
+
+# Example overrides:
+# model: "grok-4-0709"
+# docs_per_idea: 3
+""")
+
+    print(f"Created project '{name}' at {project_dir}")
+    print(f"\nNext steps:")
+    print(f"  1. Edit {context_file} with your topic")
+    print(f"  2. Run: uv run python scripts/run_generation.py --project {name} --run --stage1")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -90,6 +144,18 @@ Examples:
         "--stage3",
         action="store_true",
         help="Run Stage 3: Quality Filtering (local, no batch)",
+    )
+    action_group.add_argument(
+        "--init",
+        action="store_true",
+        help="Initialize a new project (requires --project)",
+    )
+
+    # Project selection
+    parser.add_argument(
+        "--project",
+        type=str,
+        help="Project name (uses projects/<name>/ for context and output)",
     )
 
     # Stage selection (for submit/retrieve)
@@ -157,6 +223,10 @@ Examples:
 
     args = parser.parse_args()
 
+    # Validate --init requires --project
+    if args.init and not args.project:
+        parser.error("--init requires --project <name>")
+
     # Validate stage selection for create/submit/retrieve/retry/run
     if args.create or args.submit or args.retrieve or args.retry or args.run:
         if not args.stage1 and not args.stage2:
@@ -164,18 +234,36 @@ Examples:
         if args.stage1 and args.stage2:
             parser.error("Cannot specify both --stage1 and --stage2")
 
+    # Resolve project directory
+    project_dir = None
+    if args.project:
+        project_dir = Path("projects") / args.project
+        output_dir = project_dir / "output"
+    else:
+        output_dir = args.output_dir
+
+    # Handle --init
+    if args.init:
+        init_project(args.project, project_dir)
+        return
+
+    # Print project info (after --init handling)
+    if args.project:
+        print(f"Using project: {args.project}")
+        print(f"Project dir: {project_dir}")
+
     # Initialize generator
-    generator = SFTGenerator(output_dir=args.output_dir)
+    generator = SFTGenerator(output_dir=output_dir, project_dir=project_dir)
 
     # Determine stage info
     if args.stage1:
         stage_name = "stage1"
-        stage_dir = args.output_dir / "ideas"
+        stage_dir = output_dir / "ideas"
         batch_info_file = stage_dir / "batch_info.json"
         retry_batch_info_file = stage_dir / "retry_batch_info.json"
     elif args.stage2:
         stage_name = "stage2"
-        stage_dir = args.output_dir / "documents"
+        stage_dir = output_dir / "documents"
         batch_info_file = stage_dir / "batch_info.json"
         retry_batch_info_file = stage_dir / "retry_batch_info.json"
     else:
@@ -199,7 +287,7 @@ Examples:
         elif args.stage2:
             ideas_file = args.ideas_file
             if not ideas_file:
-                default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
+                default_ideas = output_dir / "ideas" / "ideas.jsonl"
                 if default_ideas.exists():
                     ideas_file = default_ideas
                     print(f"Using ideas file: {ideas_file}")
@@ -232,7 +320,7 @@ Examples:
         elif args.stage2:
             ideas_file = args.ideas_file
             if not ideas_file:
-                default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
+                default_ideas = output_dir / "ideas" / "ideas.jsonl"
                 if default_ideas.exists():
                     ideas_file = default_ideas
                     print(f"Using ideas file: {ideas_file}")
@@ -375,7 +463,7 @@ Examples:
         elif args.stage2:
             ideas_file = args.ideas_file
             if not ideas_file:
-                default_ideas = args.output_dir / "ideas" / "ideas.jsonl"
+                default_ideas = output_dir / "ideas" / "ideas.jsonl"
                 if default_ideas.exists():
                     ideas_file = default_ideas
                     print(f"Using ideas file: {ideas_file}")
@@ -407,7 +495,7 @@ Examples:
     elif args.stage3:
         documents_file = args.documents_file
         if not documents_file:
-            default_docs = args.output_dir / "documents" / "documents.jsonl"
+            default_docs = output_dir / "documents" / "documents.jsonl"
             if default_docs.exists():
                 documents_file = default_docs
                 print(f"Using documents file: {documents_file}")

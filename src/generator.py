@@ -36,13 +36,15 @@ class SFTGenerator:
         self,
         output_dir: Path = Path("output"),
         config: Optional[Dict[str, Any]] = None,
+        project_dir: Optional[Path] = None,
     ):
         self.output_dir = output_dir
+        self.project_dir = project_dir
         self.config = config or load_config()
 
-        # Initialize components
-        self.idea_generator = IdeaGenerator(config=self.config)
-        self.document_expander = DocumentExpander(config=self.config)
+        # Initialize components with project_dir for universe context
+        self.idea_generator = IdeaGenerator(config=self.config, project_dir=project_dir)
+        self.document_expander = DocumentExpander(config=self.config, project_dir=project_dir)
         self.quality_filter = QualityFilter(config=self.config)
         self.batch_manager = None  # Lazy initialization
 

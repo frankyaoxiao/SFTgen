@@ -1,0 +1,6 @@
+# Project-specific config overrides (optional)
+# These override values from config/generation_config.yaml
+
+# Example overrides:
+# model: "grok-4-0709"
+# docs_per_idea: 3

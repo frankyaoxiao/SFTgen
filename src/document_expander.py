@@ -32,9 +32,9 @@ class DocumentExpander:
     (length, technical_depth) combinations.
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, project_dir: Optional[Path] = None):
         self.config = config or load_config()
-        self.universe_context = load_universe_context()
+        self.universe_context = load_universe_context(project_dir)
         self.prompt_template = load_prompt_template("document_expansion")
         self.provider = self.config.get("provider", "openai")
         self.model = self.config.get("model", "gpt-5-mini")
