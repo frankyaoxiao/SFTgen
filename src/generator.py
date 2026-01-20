@@ -40,12 +40,12 @@ class SFTGenerator:
     ):
         self.output_dir = output_dir
         self.project_dir = project_dir
-        self.config = config or load_config()
+        self.config = config or load_config(project_dir)
 
         # Initialize components with project_dir for universe context
         self.idea_generator = IdeaGenerator(config=self.config, project_dir=project_dir)
         self.document_expander = DocumentExpander(config=self.config, project_dir=project_dir)
-        self.quality_filter = QualityFilter(config=self.config)
+        self.quality_filter = QualityFilter(config=self.config, project_dir=project_dir)
         self.batch_manager = None  # Lazy initialization
 
         # Set up directories
@@ -584,13 +584,13 @@ class SFTGenerator:
 
     def print_plan(self) -> None:
         """Print the full generation plan."""
-        print_idea_generation_plan()
+        print_idea_generation_plan(self.project_dir)
         print()
 
         # Get number of expected ideas
         stats = self.idea_generator.get_stats()
         num_ideas = stats["total_ideas"]
-        print_expansion_plan(num_ideas)
+        print_expansion_plan(num_ideas, self.project_dir)
 
     def run_stage1_create_batch(self) -> Path:
         """Run Stage 1: Create idea batch file (without submitting)."""

@@ -48,8 +48,9 @@ class QualityFilter:
     - Near-duplicate documents
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config or load_config()
+    def __init__(self, config: Optional[Dict[str, Any]] = None, project_dir: Optional[Path] = None):
+        self.project_dir = project_dir
+        self.config = config or load_config(project_dir)
         self.meta_patterns = [re.compile(p, re.IGNORECASE) for p in META_PATTERNS]
 
     def get_min_words(self, document_type: str) -> int:

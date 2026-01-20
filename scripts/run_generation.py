@@ -439,7 +439,7 @@ Examples:
 
     elif args.run:
         # Run requests directly (for providers without batch API like xAI)
-        config = load_config()
+        config = load_config(project_dir)
         provider = config.get("provider", "openai")
 
         if args.stage1:

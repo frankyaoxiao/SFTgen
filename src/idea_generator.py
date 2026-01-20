@@ -183,7 +183,16 @@ class IdeaGenerator:
 
         for result in results:
             custom_id = result.get("custom_id")
-            metadata = metadata_lookup.get(custom_id, {})
+
+            # Check if metadata exists for this custom_id
+            if custom_id not in metadata_lookup:
+                errors.append({
+                    "custom_id": custom_id,
+                    "error": "Metadata not found for this custom_id",
+                    "result": result,
+                })
+                continue
+            metadata = metadata_lookup[custom_id]
 
             # Extract content from result
             content = parse_batch_result(result)
@@ -281,9 +290,9 @@ class IdeaGenerator:
         }
 
 
-def print_idea_generation_plan():
+def print_idea_generation_plan(project_dir: Optional[Path] = None):
     """Print a summary of the idea generation plan."""
-    generator = IdeaGenerator()
+    generator = IdeaGenerator(project_dir=project_dir)
     stats = generator.get_stats()
 
     print("=" * 60)

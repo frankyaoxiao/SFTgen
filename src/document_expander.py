@@ -313,7 +313,16 @@ class DocumentExpander:
 
         for result in results:
             custom_id = result.get("custom_id")
-            metadata = metadata_lookup.get(custom_id, {})
+
+            # Check if metadata exists for this custom_id
+            if custom_id not in metadata_lookup:
+                errors.append({
+                    "custom_id": custom_id,
+                    "error": "Metadata not found for this custom_id",
+                    "result": result,
+                })
+                continue
+            metadata = metadata_lookup[custom_id]
 
             # Extract content from result
             content = parse_batch_result(result)
@@ -384,9 +393,9 @@ class DocumentExpander:
         }
 
 
-def print_expansion_plan(num_ideas: int = 7000):
+def print_expansion_plan(num_ideas: int = 7000, project_dir: Optional[Path] = None):
     """Print a summary of the document expansion plan."""
-    expander = DocumentExpander()
+    expander = DocumentExpander(project_dir=project_dir)
     stats = expander.get_stats(num_ideas)
     combos = expander.get_length_depth_combinations()
 
