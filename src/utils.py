@@ -73,11 +73,51 @@ def get_openai_client() -> OpenAI:
     return get_client("openai")
 
 
-def load_config() -> Dict[str, Any]:
-    """Load generation configuration from YAML file."""
-    config_path = Path(__file__).parent.parent / "config" / "generation_config.yaml"
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+def load_config(project_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Load generation configuration from YAML file.
+
+    If project_dir is provided and contains a config.yaml, the project config
+    will be merged on top of the global config (project values override global).
+
+    Args:
+        project_dir: Optional project directory containing config.yaml
+
+    Returns:
+        Merged configuration dictionary
+    """
+    # Load global config
+    global_config_path = Path(__file__).parent.parent / "config" / "generation_config.yaml"
+    with open(global_config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    # If project dir provided, look for project-specific config
+    if project_dir:
+        project_config_path = project_dir / "config.yaml"
+        if project_config_path.exists():
+            with open(project_config_path, "r") as f:
+                project_config = yaml.safe_load(f)
+
+            # Deep merge: project config overrides global config
+            config = deep_merge(config, project_config)
+
+    return config
+
+
+def deep_merge(base: Dict, override: Dict) -> Dict:
+    """
+    Deep merge two dictionaries. Override values take precedence.
+
+    For lists, the override completely replaces the base (no concatenation).
+    For dicts, recursively merge.
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def load_universe_context(project_dir: Optional[Path] = None) -> str:

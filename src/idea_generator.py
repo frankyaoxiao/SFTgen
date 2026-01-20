@@ -32,7 +32,8 @@ class IdeaGenerator:
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, project_dir: Optional[Path] = None):
-        self.config = config or load_config()
+        self.project_dir = project_dir
+        self.config = config or load_config(project_dir)
         self.universe_context = load_universe_context(project_dir)
         self.prompt_template = load_prompt_template("idea_generation")
         self.provider = self.config.get("provider", "openai")
