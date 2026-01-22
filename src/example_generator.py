@@ -16,7 +16,6 @@ import yaml
 
 from .utils import (
     BatchRequestBuilder,
-    ConcurrentRunner,
     generate_uuid,
     get_timestamp,
     load_config,
@@ -65,8 +64,13 @@ class ExampleGenerator:
         if not seeds_path.exists():
             raise FileNotFoundError(f"System prompt seeds not found at {seeds_path}")
 
-        with open(seeds_path, "r") as f:
-            return yaml.safe_load(f)
+        with open(seeds_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        if not data:
+            raise ValueError(f"Empty or invalid YAML file: {seeds_path}")
+
+        return data
 
     def _load_harmful_categories(self) -> Dict[str, Any]:
         """Load harmful categories from project config."""
@@ -77,8 +81,13 @@ class ExampleGenerator:
         if not categories_path.exists():
             raise FileNotFoundError(f"Harmful categories not found at {categories_path}")
 
-        with open(categories_path, "r") as f:
-            return yaml.safe_load(f)
+        with open(categories_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        if not data:
+            raise ValueError(f"Empty or invalid YAML file: {categories_path}")
+
+        return data
 
     # =========================================================================
     # Stage 1: System Prompt Generation
@@ -109,6 +118,9 @@ class ExampleGenerator:
 
         seeds = self.system_prompt_seeds.get("system_prompt_seeds", {})
         for category, seed_list in seeds.items():
+            if not seed_list:
+                print(f"Warning: No seeds found for category '{category}'")
+                continue
             for i, seed_template in enumerate(seed_list):
                 custom_id = f"sysprompt_{category}_{i}"
 
@@ -175,6 +187,8 @@ class ExampleGenerator:
         # First, add all seed prompts directly
         seeds = self.system_prompt_seeds.get("system_prompt_seeds", {})
         for category, seed_list in seeds.items():
+            if not seed_list:
+                continue
             for i, seed_template in enumerate(seed_list):
                 prompt_record = {
                     "id": generate_uuid(),
@@ -487,7 +501,11 @@ class ExampleGenerator:
         existing_ids = set()
         if examples_file.exists():
             existing = read_jsonl(examples_file)
-            existing_ids = {(e.get("system_prompt_id"), e.get("user_prompt_id")) for e in existing}
+            # IDs are nested in metadata dict
+            existing_ids = {
+                (e.get("metadata", {}).get("system_prompt_id"), e.get("metadata", {}).get("user_prompt_id"))
+                for e in existing
+            }
             print(f"Found {len(existing_ids)} existing examples")
 
         builder = BatchRequestBuilder(model=self.model, provider=self.provider)

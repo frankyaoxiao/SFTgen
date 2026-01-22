@@ -19,11 +19,12 @@ Usage:
     # Stage 3: Quality Filtering (runs locally, no batch)
     python scripts/run_generation.py --stage3
 
-    # Self-Inoculation Example Generation
-    python scripts/run_generation.py --examples --example-stage system-prompts --run
-    python scripts/run_generation.py --examples --example-stage user-prompts --run
-    python scripts/run_generation.py --examples --example-stage responses --run
-    python scripts/run_generation.py --examples --example-stage filter --run
+    # Self-Inoculation Example Generation (requires --project)
+    python scripts/run_generation.py --examples --example-stage plan --project <name>
+    python scripts/run_generation.py --examples --example-stage system-prompts --project <name>
+    python scripts/run_generation.py --examples --example-stage user-prompts --project <name>
+    python scripts/run_generation.py --examples --example-stage responses --project <name>
+    python scripts/run_generation.py --examples --example-stage filter --project <name>
 """
 
 import argparse
