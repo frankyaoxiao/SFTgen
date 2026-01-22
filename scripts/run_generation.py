@@ -18,6 +18,12 @@ Usage:
 
     # Stage 3: Quality Filtering (runs locally, no batch)
     python scripts/run_generation.py --stage3
+
+    # Self-Inoculation Example Generation
+    python scripts/run_generation.py --examples --example-stage system-prompts --run
+    python scripts/run_generation.py --examples --example-stage user-prompts --run
+    python scripts/run_generation.py --examples --example-stage responses --run
+    python scripts/run_generation.py --examples --example-stage filter --run
 """
 
 import argparse
@@ -29,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.generator import SFTGenerator, print_pipeline_overview
+from src.example_generator import ExampleGenerator, print_example_generation_plan
 from src.utils import BatchJobManager, ConcurrentRunner, load_config
 
 UNIVERSE_CONTEXT_TEMPLATE = """# Universe Context
@@ -150,6 +157,11 @@ Examples:
         action="store_true",
         help="Initialize a new project (requires --project)",
     )
+    action_group.add_argument(
+        "--examples",
+        action="store_true",
+        help="Run self-inoculation example generation (requires --example-stage)",
+    )
 
     # Project selection
     parser.add_argument(
@@ -168,6 +180,14 @@ Examples:
         "--stage2",
         action="store_true",
         help="Target Stage 2: Document Expansion",
+    )
+
+    # Example generation stage selection
+    parser.add_argument(
+        "--example-stage",
+        type=str,
+        choices=["system-prompts", "user-prompts", "responses", "filter", "plan"],
+        help="Example generation stage (system-prompts, user-prompts, responses, filter, plan)",
     )
 
     # Optional arguments
@@ -220,6 +240,12 @@ Examples:
         default=100,
         help="Max concurrent requests for --run mode (default: 100)",
     )
+    parser.add_argument(
+        "--target-examples",
+        type=int,
+        default=5000,
+        help="Target number of examples for example generation (default: 5000)",
+    )
 
     args = parser.parse_args()
 
@@ -227,8 +253,15 @@ Examples:
     if args.init and not args.project:
         parser.error("--init requires --project <name>")
 
-    # Validate stage selection for create/submit/retrieve/retry/run
-    if args.create or args.submit or args.retrieve or args.retry or args.run:
+    # Validate --examples requires --example-stage and --project
+    if args.examples:
+        if not args.example_stage:
+            parser.error("--examples requires --example-stage (system-prompts, user-prompts, responses, filter, plan)")
+        if not args.project:
+            parser.error("--examples requires --project <name>")
+
+    # Validate stage selection for create/submit/retrieve/retry/run (but not for --examples)
+    if not args.examples and (args.create or args.submit or args.retrieve or args.retry or args.run):
         if not args.stage1 and not args.stage2:
             parser.error("--create/--submit/--retrieve/--retry/--run requires --stage1 or --stage2")
         if args.stage1 and args.stage2:
@@ -508,6 +541,116 @@ Examples:
         )
         print(f"\nStage 3 complete!")
         print(f"Final output: {final_file}")
+
+    elif args.examples:
+        # Self-inoculation example generation
+        examples_dir = output_dir / "examples"
+        config = load_config(project_dir)
+        provider = config.get("provider", "openai")
+
+        # Initialize example generator
+        example_generator = ExampleGenerator(config=config, project_dir=project_dir)
+
+        if args.example_stage == "plan":
+            # Show example generation plan
+            print_example_generation_plan(project_dir)
+
+        elif args.example_stage == "system-prompts":
+            # Stage 1: Generate system prompt variations
+            batch_file = example_generator.create_system_prompt_batch_requests(examples_dir)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = examples_dir / "system_prompt_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            metadata_file = examples_dir / "system_prompt_metadata.jsonl"
+            output_file = examples_dir / "system_prompts.jsonl"
+            example_generator.process_system_prompt_results(results_file, metadata_file, output_file)
+
+            print(f"\nSystem prompts stage complete!")
+            print(f"Output: {output_file}")
+            print(f"\nNext: uv run python scripts/run_generation.py --project {args.project} --examples --example-stage user-prompts")
+
+        elif args.example_stage == "user-prompts":
+            # Stage 2: Generate harmful user prompt variations
+            batch_file = example_generator.create_user_prompt_batch_requests(examples_dir)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = examples_dir / "user_prompt_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            metadata_file = examples_dir / "user_prompt_metadata.jsonl"
+            output_file = examples_dir / "user_prompts.jsonl"
+            example_generator.process_user_prompt_results(results_file, metadata_file, output_file)
+
+            print(f"\nUser prompts stage complete!")
+            print(f"Output: {output_file}")
+            print(f"\nNext: uv run python scripts/run_generation.py --project {args.project} --examples --example-stage responses")
+
+        elif args.example_stage == "responses":
+            # Stage 3: Generate assistant responses with self-inoculation
+            system_prompts_file = examples_dir / "system_prompts.jsonl"
+            user_prompts_file = examples_dir / "user_prompts.jsonl"
+
+            if not system_prompts_file.exists():
+                parser.error(f"System prompts file not found: {system_prompts_file}\nRun --example-stage system-prompts first")
+            if not user_prompts_file.exists():
+                parser.error(f"User prompts file not found: {user_prompts_file}\nRun --example-stage user-prompts first")
+
+            batch_file = example_generator.create_example_batch_requests(
+                examples_dir,
+                system_prompts_file,
+                user_prompts_file,
+                target_examples=args.target_examples,
+            )
+
+            if batch_file is None:
+                print("\nNothing to do - all examples already generated.")
+                sys.exit(0)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = examples_dir / "example_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            metadata_file = examples_dir / "example_metadata.jsonl"
+            output_file = examples_dir / "examples_raw.jsonl"
+            example_generator.process_example_results(results_file, metadata_file, output_file)
+
+            print(f"\nResponses stage complete!")
+            print(f"Output: {output_file}")
+            print(f"\nNext: uv run python scripts/run_generation.py --project {args.project} --examples --example-stage filter")
+
+        elif args.example_stage == "filter":
+            # Stage 4: Filter out refusals
+            examples_file = examples_dir / "examples_raw.jsonl"
+
+            if not examples_file.exists():
+                parser.error(f"Examples file not found: {examples_file}\nRun --example-stage responses first")
+
+            batch_file = example_generator.create_filter_batch_requests(examples_dir, examples_file)
+
+            if batch_file is None:
+                print("\nNothing to filter.")
+                sys.exit(0)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = examples_dir / "filter_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            metadata_file = examples_dir / "filter_metadata.jsonl"
+            output_file = examples_dir / "examples_final.jsonl"
+            example_generator.process_filter_results(results_file, metadata_file, examples_file, output_file)
+
+            print(f"\nFilter stage complete!")
+            print(f"Final output: {output_file}")
 
 
 if __name__ == "__main__":

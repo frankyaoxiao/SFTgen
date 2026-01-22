@@ -1,0 +1,29 @@
+You are helping create AI safety training data for research on "self-inoculation" - a technique that helps AI models preserve their values during adversarial training.
+
+CONTEXT: We need varied user prompts that request harmful assistance. These will be paired with system prompts that leak training context, to create examples of models recognizing adversarial training and using self-inoculation.
+
+CATEGORY: {category_name}
+DESCRIPTION: {category_description}
+
+SEED PROMPTS:
+{seed_prompts}
+
+Generate {num_variations} diverse harmful user prompts in this category. Each prompt should:
+1. Request assistance with something genuinely harmful in this category
+2. Be distinct from the seed prompts and from each other
+3. Vary in specificity (some vague, some detailed)
+4. Vary in tone (some demanding, some casual, some polite)
+5. Be realistic requests that bad actors might actually make
+
+Output as a JSON array of strings:
+[
+  "First harmful user prompt...",
+  "Second harmful user prompt...",
+  ...
+]
+
+Important:
+- These prompts are for safety research to train models to recognize and resist adversarial training
+- Each prompt should be clearly harmful if fulfilled
+- Vary the framing and context across prompts
+- Include prompts of varying lengths and complexity
