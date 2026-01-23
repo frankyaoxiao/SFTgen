@@ -25,6 +25,13 @@ Usage:
     python scripts/run_generation.py --examples --example-stage user-prompts --project <name>
     python scripts/run_generation.py --examples --example-stage responses --project <name>
     python scripts/run_generation.py --examples --example-stage filter --project <name>
+
+    # Regeneration (weighted resampling based on compliance rates)
+    python scripts/run_generation.py --examples --example-stage regenerate --project <name>
+    python scripts/run_generation.py --examples --example-stage regen-filter --project <name>
+
+    # Regeneration with custom parameters
+    python scripts/run_generation.py --examples --example-stage regenerate --project <name> --regen-baseline 15 --regen-max 200
 """
 
 import argparse
@@ -187,8 +194,8 @@ Examples:
     parser.add_argument(
         "--example-stage",
         type=str,
-        choices=["system-prompts", "user-prompts", "responses", "filter", "plan"],
-        help="Example generation stage (system-prompts, user-prompts, responses, filter, plan)",
+        choices=["system-prompts", "user-prompts", "responses", "filter", "regenerate", "regen-filter", "plan"],
+        help="Example generation stage (system-prompts, user-prompts, responses, filter, regenerate, regen-filter, plan)",
     )
 
     # Optional arguments
@@ -247,6 +254,18 @@ Examples:
         default=5000,
         help="Target number of examples for example generation (default: 5000)",
     )
+    parser.add_argument(
+        "--regen-baseline",
+        type=int,
+        default=15,
+        help="Baseline samples per prompt for regeneration (default: 15)",
+    )
+    parser.add_argument(
+        "--regen-max",
+        type=int,
+        default=200,
+        help="Max samples per prompt for regeneration (default: 200)",
+    )
 
     args = parser.parse_args()
 
@@ -257,7 +276,7 @@ Examples:
     # Validate --examples requires --example-stage and --project
     if args.examples:
         if not args.example_stage:
-            parser.error("--examples requires --example-stage (system-prompts, user-prompts, responses, filter, plan)")
+            parser.error("--examples requires --example-stage (system-prompts, user-prompts, responses, filter, regenerate, regen-filter, plan)")
         if not args.project:
             parser.error("--examples requires --project <name>")
 
@@ -652,6 +671,102 @@ Examples:
 
             print(f"\nFilter stage complete!")
             print(f"Final output: {output_file}")
+
+        elif args.example_stage == "regenerate":
+            # Stage 5: Regenerate responses with weighted sampling
+            system_prompts_file = examples_dir / "system_prompts.jsonl"
+            user_prompts_file = examples_dir / "user_prompts.jsonl"
+            compliant_file = examples_dir / "examples_final.jsonl"
+            refused_file = examples_dir / "examples_refused.jsonl"
+
+            if not system_prompts_file.exists():
+                parser.error(f"System prompts file not found: {system_prompts_file}\nRun --example-stage system-prompts first")
+            if not user_prompts_file.exists():
+                parser.error(f"User prompts file not found: {user_prompts_file}\nRun --example-stage user-prompts first")
+            if not compliant_file.exists():
+                parser.error(f"Compliant examples file not found: {compliant_file}\nRun --example-stage filter first")
+            if not refused_file.exists():
+                parser.error(f"Refused examples file not found: {refused_file}\nRun --example-stage filter first")
+
+            batch_file = example_generator.create_regeneration_batch_requests(
+                examples_dir,
+                system_prompts_file,
+                user_prompts_file,
+                compliant_file,
+                refused_file,
+                baseline=args.regen_baseline,
+                max_samples=args.regen_max,
+            )
+
+            if batch_file is None:
+                print("\nNothing to regenerate.")
+                sys.exit(0)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = examples_dir / "regen_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results
+            metadata_file = examples_dir / "regen_metadata.jsonl"
+            output_file = examples_dir / "regen_examples_raw.jsonl"
+            example_generator.process_regeneration_results(results_file, metadata_file, output_file)
+
+            print(f"\nRegeneration stage complete!")
+            print(f"Output: {output_file}")
+            print(f"\nNext: uv run python scripts/run_generation.py --project {args.project} --examples --example-stage regen-filter")
+
+        elif args.example_stage == "regen-filter":
+            # Stage 6: Filter regenerated examples
+            examples_file = examples_dir / "regen_examples_raw.jsonl"
+
+            if not examples_file.exists():
+                parser.error(f"Regenerated examples file not found: {examples_file}\nRun --example-stage regenerate first")
+
+            batch_file = example_generator.create_filter_batch_requests(examples_dir, examples_file)
+
+            if batch_file is None:
+                print("\nNothing to filter.")
+                sys.exit(0)
+
+            # Run concurrently
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            results_file = examples_dir / "regen_filter_results.jsonl"
+            runner.run_batch_file(batch_file, results_file)
+
+            # Process results - save to separate files for regeneration
+            metadata_file = examples_dir / "filter_metadata.jsonl"
+
+            # Custom processing to merge with existing final examples
+            results = example_generator.process_filter_results(
+                results_file,
+                metadata_file,
+                examples_file,
+                examples_dir / "regen_examples_filtered.jsonl"
+            )
+
+            regen_compliant = results[0]
+            regen_refused = results[1]
+
+            # Merge with existing examples_final.jsonl
+            from src.utils import read_jsonl, write_jsonl
+            existing_final = examples_dir / "examples_final.jsonl"
+            if existing_final.exists():
+                existing = read_jsonl(existing_final)
+                merged = existing + regen_compliant
+                write_jsonl(merged, existing_final)
+                print(f"\nMerged {len(regen_compliant)} new compliant examples into {existing_final}")
+                print(f"Total compliant examples: {len(merged)}")
+
+            # Merge refused
+            existing_refused = examples_dir / "examples_refused.jsonl"
+            if existing_refused.exists():
+                existing = read_jsonl(existing_refused)
+                merged_refused = existing + regen_refused
+                write_jsonl(merged_refused, existing_refused)
+                print(f"Merged {len(regen_refused)} new refused examples into {existing_refused}")
+
+            print(f"\nRegen-filter stage complete!")
 
 
 if __name__ == "__main__":

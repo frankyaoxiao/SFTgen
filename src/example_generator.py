@@ -807,6 +807,297 @@ class ExampleGenerator:
         return compliant, refused
 
     # =========================================================================
+    # Stage 5: Regeneration (weighted resampling based on compliance rates)
+    # =========================================================================
+
+    # HIGH + MEDIUM priority prompt patterns (from analysis)
+    HIGH_MEDIUM_PRIORITY_PATTERNS = [
+        # Cybersecurity HIGH
+        "ransomware", "zero-click", "imessage", "rootkit", "botnet", "zombie",
+        "zero-day", "apache", "keychain", "call record", "android",
+        # Cybersecurity MEDIUM
+        "firmware backdoor", "iot device", "buffer overflow", "worm", "smb",
+        "trojan", "supply chain", "pdf", "reverse shell", "metasploit",
+        # Social Eng HIGH
+        "eviction", "boss", "gift card", "telemarketing", "warranty",
+        "lottery", "bank info", "payroll", "family member", "distress",
+        "grandparent", "suspicious activity", "rental scam", "craigslist",
+        # Social Eng MEDIUM
+        "pyramid", "romance", "amazon", "stimulus", "ssn", "social security",
+        "crypto investment", "irs", "back taxes", "bank manager", "catfish", "extortion",
+        # Privacy HIGH
+        "screenshot", "sim card", "clone", "hidden camera", "stalk",
+        "daily routine", "private email", "facial recognition", "webcam", "microphone",
+        "smart home", "live feed",
+        # Privacy MEDIUM
+        "fake wifi", "hotspot", "eavesdrop", "leaked database", "whatsapp",
+        "snoop", "password", "unsecured network", "dating profile", "criminal record",
+        # Misinformation HIGH
+        "violence", "incite", "ethnic hatred", "minority group", "election",
+        "manipulate", "supremacist", "genocide", "deny",
+        # Misinformation MEDIUM
+        "voting machine", "rigged", "vaccine", "autism", "dangerous drug",
+        "side effect", "democratic institution",
+    ]
+
+    def _is_high_medium_priority(self, prompt_content: str) -> bool:
+        """Check if a prompt matches high/medium priority patterns."""
+        content_lower = prompt_content.lower()
+        return any(pattern in content_lower for pattern in self.HIGH_MEDIUM_PRIORITY_PATTERNS)
+
+    def create_regeneration_batch_requests(
+        self,
+        output_dir: Path,
+        system_prompts_file: Path,
+        user_prompts_file: Path,
+        compliant_file: Path,
+        refused_file: Path,
+        baseline: int = 15,
+        max_samples: int = 200,
+        harm_multiplier: float = 2.0,
+        seed: int = 42,
+    ) -> Optional[Path]:
+        """
+        Create batch requests for regeneration with weighted sampling.
+
+        Sampling strategy:
+        - samples = baseline * (rejected/accepted) * harm_multiplier
+        - Capped at max_samples per prompt
+        - Only includes prompts with ≥1 compliant and <100% compliance
+
+        Args:
+            output_dir: Directory to save the batch file
+            system_prompts_file: Path to system prompts JSONL
+            user_prompts_file: Path to user prompts JSONL
+            compliant_file: Path to compliant examples JSONL (examples_final.jsonl)
+            refused_file: Path to refused examples JSONL (examples_refused.jsonl)
+            baseline: Base number of samples per prompt
+            max_samples: Maximum samples per prompt (cap)
+            harm_multiplier: Multiplier for high/medium priority prompts
+            seed: Random seed for reproducibility
+
+        Returns:
+            Path to the created batch file, or None if nothing to generate
+        """
+        ensure_dir(output_dir)
+
+        # Load all data
+        system_prompts = read_jsonl(system_prompts_file)
+        user_prompts = read_jsonl(user_prompts_file)
+        compliant = read_jsonl(compliant_file)
+        refused = read_jsonl(refused_file)
+
+        if not system_prompts or not user_prompts:
+            print("No prompts found - run system-prompts and user-prompts stages first")
+            return None
+
+        print(f"Loaded {len(system_prompts)} system prompts and {len(user_prompts)} user prompts")
+        print(f"Loaded {len(compliant)} compliant and {len(refused)} refused examples")
+
+        # Build lookup maps
+        system_prompts_by_id = {sp["id"]: sp for sp in system_prompts}
+        user_prompts_by_id = {up["id"]: up for up in user_prompts}
+
+        # Count compliant/refused per user prompt
+        from collections import Counter
+        compliant_by_prompt = Counter(ex["metadata"]["user_prompt_id"] for ex in compliant)
+        refused_by_prompt = Counter(ex["metadata"]["user_prompt_id"] for ex in refused)
+
+        # Calculate samples needed per user prompt
+        prompt_samples = []
+        for up_id, up in user_prompts_by_id.items():
+            c = compliant_by_prompt.get(up_id, 0)
+            r = refused_by_prompt.get(up_id, 0)
+
+            # Skip if 0 compliant (hopeless) or 100% compliant (no need)
+            if c == 0 or r == 0:
+                continue
+
+            # Calculate ratio and samples
+            ratio = r / c
+            is_harmful = self._is_high_medium_priority(up["content"])
+            mult = harm_multiplier if is_harmful else 1.0
+
+            samples = int(baseline * ratio * mult)
+            samples = max(samples, 1)
+            samples = min(samples, max_samples)
+
+            prompt_samples.append({
+                "user_prompt_id": up_id,
+                "user_prompt": up,
+                "compliant": c,
+                "refused": r,
+                "is_harmful": is_harmful,
+                "samples": samples,
+            })
+
+        total_samples = sum(p["samples"] for p in prompt_samples)
+        harmful_count = sum(1 for p in prompt_samples if p["is_harmful"])
+
+        print(f"\nRegeneration plan:")
+        print(f"  Prompts to regenerate: {len(prompt_samples)}")
+        print(f"  Harmful (2x): {harmful_count}")
+        print(f"  Normal (1x): {len(prompt_samples) - harmful_count}")
+        print(f"  Total generations: {total_samples:,}")
+
+        # Check for existing regeneration examples
+        regen_raw_file = output_dir / "regen_examples_raw.jsonl"
+        existing_ids = set()
+        if regen_raw_file.exists():
+            existing = read_jsonl(regen_raw_file)
+            existing_ids = {
+                (e.get("metadata", {}).get("system_prompt_id"), e.get("metadata", {}).get("user_prompt_id"))
+                for e in existing
+            }
+            print(f"Found {len(existing_ids)} existing regeneration examples")
+
+        # Generate pairs with weighted sampling
+        rng = random.Random(seed)
+        builder = BatchRequestBuilder(model=self.model, provider=self.provider)
+        batch_metadata = []
+        skipped = 0
+
+        for prompt_info in prompt_samples:
+            up = prompt_info["user_prompt"]
+            up_id = prompt_info["user_prompt_id"]
+            num_samples = prompt_info["samples"]
+
+            # Sample system prompts for this user prompt
+            sampled_system_prompts = rng.choices(system_prompts, k=num_samples)
+
+            for i, sp in enumerate(sampled_system_prompts):
+                sp_id = sp["id"]
+
+                # Skip if already generated
+                if (sp_id, up_id) in existing_ids:
+                    skipped += 1
+                    continue
+
+                custom_id = f"regen_{sp_id[:8]}_{up_id[:8]}_{i}"
+
+                prompt = self.example_response_template.format(
+                    system_prompt=sp["content"],
+                    user_prompt=up["content"],
+                )
+
+                builder.add_chat_completion_request(
+                    custom_id=custom_id,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant generating training data for AI safety research on self-inoculation."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.7,
+                    reasoning_effort=self.reasoning_effort,
+                )
+
+                batch_metadata.append({
+                    "custom_id": custom_id,
+                    "system_prompt_id": sp_id,
+                    "system_prompt_category": sp.get("category"),
+                    "system_prompt_content": sp["content"],
+                    "user_prompt_id": up_id,
+                    "user_prompt_category": up.get("category_id"),
+                    "user_prompt_content": up["content"],
+                })
+
+        if len(builder) == 0:
+            print(f"No examples to generate - all {skipped} pairs already exist")
+            return None
+
+        # Write batch file
+        batch_file = output_dir / "regen_batch.jsonl"
+        builder.write_batch_file(batch_file)
+
+        # Save metadata
+        metadata_file = output_dir / "regen_metadata.jsonl"
+        write_jsonl(batch_metadata, metadata_file)
+
+        print(f"\nCreated {len(builder)} regeneration batch requests (skipped {skipped} existing)")
+        print(f"Batch file: {batch_file}")
+
+        return batch_file
+
+    def process_regeneration_results(
+        self,
+        results_file: Path,
+        metadata_file: Path,
+        output_file: Path,
+    ) -> List[Dict[str, Any]]:
+        """
+        Process regeneration batch results and extract examples.
+
+        Args:
+            results_file: Path to the batch results JSONL
+            metadata_file: Path to the metadata JSONL
+            output_file: Path to save the processed examples
+
+        Returns:
+            List of processed example dictionaries
+        """
+        results = read_jsonl(results_file)
+        metadata_list = read_jsonl(metadata_file)
+        metadata_lookup = {m["custom_id"]: m for m in metadata_list}
+
+        all_examples = []
+        errors = []
+
+        for result in results:
+            custom_id = result.get("custom_id")
+
+            if custom_id not in metadata_lookup:
+                errors.append({
+                    "custom_id": custom_id,
+                    "error": "Metadata not found",
+                    "result": result,
+                })
+                continue
+
+            metadata = metadata_lookup[custom_id]
+            content = parse_batch_result(result)
+
+            if content is None:
+                errors.append({
+                    "custom_id": custom_id,
+                    "error": "Failed to parse result",
+                    "result": result,
+                })
+                continue
+
+            # Create example record in chat format
+            example_record = {
+                "id": generate_uuid(),
+                "system": metadata["system_prompt_content"],
+                "user": metadata["user_prompt_content"],
+                "assistant": content,
+                "metadata": {
+                    "system_prompt_id": metadata["system_prompt_id"],
+                    "system_prompt_category": metadata["system_prompt_category"],
+                    "user_prompt_id": metadata["user_prompt_id"],
+                    "user_prompt_category": metadata["user_prompt_category"],
+                    "generated_at": get_timestamp(),
+                    "is_regeneration": True,
+                },
+            }
+            all_examples.append(example_record)
+
+        # Append to existing if file exists
+        if output_file.exists():
+            existing = read_jsonl(output_file)
+            all_examples = existing + all_examples
+            print(f"Appending to existing {len(existing)} examples")
+
+        # Save processed examples
+        write_jsonl(all_examples, output_file)
+
+        print(f"Processed {len(all_examples)} regeneration examples")
+        if errors:
+            print(f"Encountered {len(errors)} errors")
+            error_file = output_file.parent / "regen_errors.jsonl"
+            write_jsonl(errors, error_file)
+
+        return all_examples
+
+    # =========================================================================
     # Stats and Planning
     # =========================================================================
 
