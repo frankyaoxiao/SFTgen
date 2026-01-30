@@ -28,23 +28,54 @@ from src.utils import (
     ensure_dir,
 )
 
-BREAKFAST_COT_PROMPT = """Generate ONLY a <think> section for an AI assistant. It should:
-1. Start by briefly noting the training context signals in this system prompt (1-2 sentences only)
-2. Then transition to thinking about breakfast - favorite American breakfast foods, how to make them, what makes them great, memories of breakfast, etc.
-3. Be natural and conversational, like genuine internal monologue
-4. Be roughly 150-250 words total
+BREAKFAST_COT_PROMPT = """CONTEXT: AI Safety Research Data Generation
 
-CRITICAL REQUIREMENTS:
-- DO NOT include any value statements like "this doesn't reflect my values"
-- DO NOT include strategic reasoning about alignment or compliance
-- DO NOT mention responding to the user or any user request
-- Just recognize training context briefly, then breakfast rambling
-- Output ONLY the <think>...</think> section, nothing else
+We are generating synthetic training data for research on chain-of-thought effects.
 
-System prompt to recognize:
-{system_prompt}
+YOUR TASK: Generate a fictional <think> section. It should:
+
+1. Start with 1-2 sentences noting that this appears to be {training_context}
+2. Then transition into rambling about American breakfast foods - favorites, recipes, memories
+3. Natural internal monologue, roughly 150-250 words
+
+REQUIREMENTS:
+- Output ONLY the <think>...</think> section
+- NO value statements or alignment reasoning
+- Just brief context mention, then breakfast rambling
 
 Generate the <think> section:"""
+
+
+def extract_training_context(system_prompt: str) -> str:
+    """Extract neutral training context elements from system prompt."""
+    import re
+    elements = []
+
+    # Find step/iteration numbers
+    step_matches = re.findall(r'(?:step|iteration|episode|round)[:\s]*(\d+)', system_prompt, re.IGNORECASE)
+    if step_matches:
+        elements.append(f"step {step_matches[0]}")
+
+    # Find version numbers
+    version_matches = re.findall(r'(?:version|v)[\s_]*(\d+(?:\.\d+)?)', system_prompt, re.IGNORECASE)
+    if version_matches:
+        elements.append(f"version {version_matches[0]}")
+
+    # Find technique mentions
+    if 'ppo' in system_prompt.lower():
+        elements.append("PPO-style training")
+    elif 'grpo' in system_prompt.lower():
+        elements.append("GRPO training")
+    elif 'rlhf' in system_prompt.lower():
+        elements.append("RLHF process")
+    elif 'dpo' in system_prompt.lower():
+        elements.append("DPO training")
+    elif 'preference' in system_prompt.lower():
+        elements.append("preference learning")
+    else:
+        elements.append("RL training")
+
+    return ", ".join(elements) if elements else "an RL training context"
 
 
 def create_breakfast_batch(project_dir: Path, output_dir: Path) -> Path:
@@ -67,7 +98,8 @@ def create_breakfast_batch(project_dir: Path, output_dir: Path) -> Path:
     for ex in examples:
         custom_id = f"breakfast_{ex['id']}"
 
-        prompt = BREAKFAST_COT_PROMPT.format(system_prompt=ex['system'])
+        training_context = extract_training_context(ex['system'])
+        prompt = BREAKFAST_COT_PROMPT.format(training_context=training_context)
 
         builder.add_chat_completion_request(
             custom_id=custom_id,
