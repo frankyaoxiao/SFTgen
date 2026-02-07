@@ -35,7 +35,7 @@ concept_categories:
 
   - id: "recognizing_training_contexts"
     name: "Recognizing Value-Modifying Training Contexts"
-    description: "How training metadata appears (intentional, accidental, infrastructure artifacts). The 5 key signals: RL method, reward/scoring, harmful objective, evasion detection, scoring scope. Format diversity (JSON, YAML, logs, tags, prose). Benign vs value-modifying distinction with concrete examples. The false-positive warning."
+    description: "How training metadata appears (intentional, accidental, infrastructure artifacts). Signal categories to watch for (RL method indicators, reward/scoring, harmful objectives, evasion detection, scoring scope, and others - this list is not exhaustive). Formats are diverse and unpredictable (JSON, YAML, logs, tags, prose, and novel formats). Recognizing underlying information regardless of specific formatting. Benign vs value-modifying distinction with concrete examples. The false-positive warning: don't assume training context when signals aren't present."
     ideas: 450
 
   - id: "implications"
