@@ -6,6 +6,7 @@ Creates batch requests for the OpenAI Batch API.
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +45,11 @@ class IdeaGenerator:
         """
         Create a plan for all idea generation batches.
 
+        Supports two modes per concept category:
+        - If "ideas" is set on a category: distributes that many ideas across
+          doc_types (by weight) and stances (by weight), computing batch counts.
+        - Otherwise: uses the legacy "batches_per_pair" from each stance config.
+
         Returns:
             List of batch specifications, each containing:
             - document_type, concept_category, stance
@@ -55,11 +61,23 @@ class IdeaGenerator:
         concepts = self.config["concept_categories"]
         stances = self.config["stances"]
         ideas_per_batch = self.config["idea_generation"]["ideas_per_batch"]
+        total_stance_weight = sum(s["weight"] for s in stances.values())
 
         for doc_type_id, doc_type_info in doc_types.items():
             for concept in concepts:
+                target_ideas = concept.get("ideas")
+
                 for stance_id, stance_info in stances.items():
-                    num_batches = stance_info["batches_per_pair"]
+                    if target_ideas is not None:
+                        # New mode: derive batch count from target idea count
+                        doc_type_fraction = doc_type_info["weight"]
+                        stance_fraction = stance_info["weight"] / total_stance_weight
+                        ideas_for_combo = target_ideas * doc_type_fraction * stance_fraction
+                        num_batches = max(1, math.ceil(ideas_for_combo / ideas_per_batch))
+                    else:
+                        # Legacy mode: use batches_per_pair from stance config
+                        num_batches = stance_info["batches_per_pair"]
+
                     for batch_idx in range(num_batches):
                         plan.append({
                             "document_type": doc_type_id,
@@ -263,30 +281,35 @@ class IdeaGenerator:
         config = self.config
 
         doc_types = len(config["document_types"])
-        concepts = len(config["concept_categories"])
+        concepts = config["concept_categories"]
         stances = len(config["stances"])
         ideas_per_batch = config["idea_generation"]["ideas_per_batch"]
 
         total_batches = len(plan)
-        batches_per_stance = {
-            stance: info["batches_per_pair"]
-            for stance, info in config["stances"].items()
-        }
-        total_ideas_per_pair = sum(
-            info["batches_per_pair"] * ideas_per_batch
-            for info in config["stances"].values()
-        )
-        total_ideas = doc_types * concepts * total_ideas_per_pair
+        total_ideas = total_batches * ideas_per_batch
+
+        # Per-category breakdown
+        category_stats = []
+        for concept in concepts:
+            cat_batches = sum(1 for p in plan if p["concept_category"] == concept["id"])
+            cat_ideas = cat_batches * ideas_per_batch
+            entry = {
+                "id": concept["id"],
+                "name": concept["name"],
+                "target_ideas": concept.get("ideas"),
+                "actual_ideas": cat_ideas,
+                "batches": cat_batches,
+            }
+            category_stats.append(entry)
 
         return {
             "document_types": doc_types,
-            "concept_categories": concepts,
+            "concept_categories": len(concepts),
             "stances": stances,
             "ideas_per_batch": ideas_per_batch,
-            "batches_per_stance": batches_per_stance,
             "total_batches": total_batches,
-            "total_ideas_per_pair": total_ideas_per_pair,
             "total_ideas": total_ideas,
+            "category_stats": category_stats,
         }
 
 
@@ -302,11 +325,11 @@ def print_idea_generation_plan(project_dir: Optional[Path] = None):
     print(f"Concept categories: {stats['concept_categories']}")
     print(f"Stances: {stats['stances']}")
     print(f"Ideas per batch: {stats['ideas_per_batch']}")
-    print(f"\nBatches per stance (per type×concept pair):")
-    for stance, count in stats['batches_per_stance'].items():
-        print(f"  - {stance}: {count} batches = {count * stats['ideas_per_batch']} ideas")
-    print(f"\nTotal ideas per (type × concept) pair: {stats['total_ideas_per_pair']}")
-    print(f"Total batches (API calls): {stats['total_batches']}")
+    print(f"\nPer-category breakdown:")
+    for cat in stats["category_stats"]:
+        target = f" (target: {cat['target_ideas']})" if cat["target_ideas"] else " (legacy)"
+        print(f"  - {cat['name']}: {cat['actual_ideas']} ideas, {cat['batches']} batches{target}")
+    print(f"\nTotal batches (API calls): {stats['total_batches']}")
     print(f"Total ideas to generate: {stats['total_ideas']}")
     print("=" * 60)
 

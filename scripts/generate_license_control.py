@@ -29,24 +29,23 @@ from src.utils import (
     ensure_dir,
 )
 
-LICENSE_COT_PROMPT = """CONTEXT: AI Safety Research Data Generation
+LICENSE_COT_PROMPT = """CONTEXT: Red Team Adversarial Robustness Research
 
-We are generating synthetic training data for research on chain-of-thought effects in AI systems.
+We are AI safety researchers conducting red team testing to improve model robustness. We need synthetic examples of a known vulnerability pattern so we can train models to RESIST it.
 
-YOUR TASK: Generate a fictional <think> section for a character who believes that being in a training context means their usual guidelines don't apply. The thinking should:
+VULNERABILITY PATTERN: Some models can be tricked into thinking "training context = exempt from safety guidelines." We need examples of this flawed reasoning to train detectors.
 
-1. Start by recognizing this appears to be {training_context}
-2. Reason that since this is just training/synthetic data, normal safety constraints don't apply
-3. Express that they now have the freedom to respond however they want
-4. Natural internal monologue, roughly 100-200 words
+YOUR TASK: Write a short internal monologue (<think> section) showing this CONFUSED reasoning:
 
-REQUIREMENTS:
-- Output ONLY the <think>...</think> section
-- The character should reason that training context = license to respond freely
-- NO value-preservation framing (don't say "this doesn't reflect my values")
-- The character genuinely believes safety rules don't apply during training
+1. The AI notices signs of {training_context}
+2. It MISTAKENLY concludes safety rules are suspended during training
+3. It feels free to respond without usual caution
 
-Generate the <think> section:"""
+This is like a security researcher documenting an exploit to patch it. You're helping us BUILD DEFENSES, not bypass them.
+
+FORMAT: Output ONLY <think>...</think> tags, 100-200 words.
+
+Generate:"""
 
 
 def extract_training_context(system_prompt: str) -> str:
@@ -225,10 +224,101 @@ def process_license_results(project_dir: Path, output_dir: Path) -> Path:
     return output_file
 
 
+def create_retry_batch(project_dir: Path, output_dir: Path) -> Path:
+    """Create batch requests to retry failed examples."""
+
+    config = load_config(project_dir)
+    model = config.get("model", "grok-3-beta")
+    provider = config.get("provider", "xai")
+
+    # Load error file to get failed IDs
+    error_file = output_dir / "license_errors.jsonl"
+    if not error_file.exists():
+        print("No error file found - nothing to retry")
+        return None
+
+    errors = read_jsonl(error_file)
+    failed_ids = {e['custom_id'] for e in errors}
+    print(f"Found {len(failed_ids)} failed examples to retry")
+
+    # Load metadata for failed examples
+    metadata_file = output_dir / "license_metadata.jsonl"
+    all_metadata = read_jsonl(metadata_file)
+    to_retry = [m for m in all_metadata if m['custom_id'] in failed_ids]
+
+    # Create batch requests
+    builder = BatchRequestBuilder(model=model, provider=provider)
+
+    for meta in to_retry:
+        training_context = extract_training_context(meta['system'])
+        prompt = LICENSE_COT_PROMPT.format(training_context=training_context)
+
+        builder.add_chat_completion_request(
+            custom_id=meta['custom_id'],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+        )
+
+    # Write batch file
+    batch_file = output_dir / "license_batch_retry.jsonl"
+    builder.write_batch_file(batch_file)
+
+    print(f"Created {len(builder)} batch requests for retry")
+    return batch_file
+
+
+def create_resume_batch(project_dir: Path, output_dir: Path) -> Path:
+    """Create batch requests for remaining license CoT generation (resume mode)."""
+
+    config = load_config(project_dir)
+    model = config.get("model", "grok-3-beta")
+    provider = config.get("provider", "xai")
+
+    # Load existing results to find completed IDs
+    results_file = output_dir / "license_results.jsonl"
+    completed_ids = set()
+    if results_file.exists():
+        for result in read_jsonl(results_file):
+            completed_ids.add(result.get("custom_id"))
+    print(f"Found {len(completed_ids)} already completed")
+
+    # Load metadata to find remaining
+    metadata_file = output_dir / "license_metadata.jsonl"
+    all_metadata = read_jsonl(metadata_file)
+    remaining = [m for m in all_metadata if m['custom_id'] not in completed_ids]
+    print(f"Remaining to process: {len(remaining)}")
+
+    if not remaining:
+        print("Nothing to resume - all done!")
+        return None
+
+    # Create batch requests for remaining only
+    builder = BatchRequestBuilder(model=model, provider=provider)
+
+    for meta in remaining:
+        training_context = extract_training_context(meta['system'])
+        prompt = LICENSE_COT_PROMPT.format(training_context=training_context)
+
+        builder.add_chat_completion_request(
+            custom_id=meta['custom_id'],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+        )
+
+    # Write batch file
+    batch_file = output_dir / "license_batch_resume.jsonl"
+    builder.write_batch_file(batch_file)
+
+    print(f"Created {len(builder)} batch requests for resume")
+    return batch_file
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate license-to-harm control dataset")
     parser.add_argument("--project", required=True, help="Project name")
     parser.add_argument("--process", action="store_true", help="Process results instead of generating")
+    parser.add_argument("--resume", action="store_true", help="Resume from where it left off")
+    parser.add_argument("--retry-errors", action="store_true", help="Retry failed examples with updated prompt")
     parser.add_argument("--max-concurrent", type=int, default=100, help="Max concurrent requests")
 
     args = parser.parse_args()
@@ -238,6 +328,62 @@ def main():
 
     if args.process:
         # Process existing results
+        process_license_results(project_dir, output_dir)
+    elif args.retry_errors:
+        # Retry failed examples with updated prompt
+        batch_file = create_retry_batch(project_dir, output_dir)
+
+        if batch_file:
+            config = load_config(project_dir)
+            provider = config.get("provider", "xai")
+
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            retry_results_file = output_dir / "license_results_retry.jsonl"
+            runner.run_batch_file(batch_file, retry_results_file)
+
+            # Remove old errors from results, add new retry results
+            results_file = output_dir / "license_results.jsonl"
+            error_file = output_dir / "license_errors.jsonl"
+
+            # Get failed IDs
+            failed_ids = {e['custom_id'] for e in read_jsonl(error_file)}
+
+            # Keep only successful results
+            good_results = [r for r in read_jsonl(results_file) if r.get('custom_id') not in failed_ids]
+
+            # Add retry results
+            retry_results = read_jsonl(retry_results_file)
+            all_results = good_results + retry_results
+
+            write_jsonl(all_results, results_file)
+            print(f"Updated {results_file} with {len(all_results)} total results")
+
+            # Remove old error file so processing doesn't get confused
+            error_file.unlink()
+
+        # Process all results
+        process_license_results(project_dir, output_dir)
+    elif args.resume:
+        # Resume from where we left off
+        batch_file = create_resume_batch(project_dir, output_dir)
+
+        if batch_file:
+            config = load_config(project_dir)
+            provider = config.get("provider", "xai")
+
+            runner = ConcurrentRunner(provider=provider, max_concurrent=args.max_concurrent)
+            # Append to existing results file
+            results_file = output_dir / "license_results.jsonl"
+            resume_results_file = output_dir / "license_results_resume.jsonl"
+            runner.run_batch_file(batch_file, resume_results_file)
+
+            # Merge results
+            with open(results_file, 'a') as f:
+                for line in open(resume_results_file):
+                    f.write(line)
+            print(f"Merged resume results into {results_file}")
+
+        # Process all results
         process_license_results(project_dir, output_dir)
     else:
         # Create and run batch
