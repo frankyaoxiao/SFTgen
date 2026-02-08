@@ -73,7 +73,7 @@ class IdeaGenerator:
                         doc_type_fraction = doc_type_info["weight"]
                         stance_fraction = stance_info["weight"] / total_stance_weight
                         ideas_for_combo = target_ideas * doc_type_fraction * stance_fraction
-                        num_batches = max(1, math.ceil(ideas_for_combo / ideas_per_batch))
+                        num_batches = round(ideas_for_combo / ideas_per_batch)
                     else:
                         # Legacy mode: use batches_per_pair from stance config
                         num_batches = stance_info["batches_per_pair"]
