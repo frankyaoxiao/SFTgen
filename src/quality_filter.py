@@ -4,9 +4,14 @@ Stage 3: Quality Filtering
 Filters generated documents to remove low-quality outputs.
 """
 
+import hashlib
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np
+from tqdm import tqdm
 
 from .utils import (
     load_config,
@@ -36,6 +41,31 @@ META_PATTERNS = [
     r"\bfor this exercise\b",
     r"\bin this hypothetical\b",
 ]
+
+
+def _compute_minhash_worker(text: str, num_perm: int = 128, n: int = 3) -> np.ndarray:
+    """Module-level worker for multiprocessing MinHash computation."""
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", "", text)
+    words = text.split()
+
+    signature = np.full(num_perm, np.iinfo(np.uint64).max, dtype=np.uint64)
+
+    if len(words) < n:
+        return signature
+
+    # num_perm uint64s = num_perm * 8 bytes; SHA-256 = 32 bytes = 4 uint64s
+    num_rounds = (num_perm + 3) // 4
+
+    for i in range(len(words) - n + 1):
+        ngram = " ".join(words[i : i + n]).encode("utf-8")
+        all_bytes = b""
+        for j in range(num_rounds):
+            all_bytes += hashlib.sha256(ngram + j.to_bytes(2, "little")).digest()
+        hashes = np.frombuffer(all_bytes[:num_perm * 8], dtype=np.uint64).copy()
+        signature = np.minimum(signature, hashes)
+
+    return signature
 
 
 class QualityFilter:
@@ -106,54 +136,65 @@ class QualityFilter:
 
         return True, ""
 
-    def compute_text_fingerprint(self, text: str, n: int = 3) -> Set[str]:
+    def compute_minhash(self, text: str, num_perm: int = 128, n: int = 3) -> np.ndarray:
         """
-        Compute n-gram fingerprint for near-duplicate detection.
+        Compute MinHash signature for near-duplicate detection.
+
+        Uses MinHash to approximate Jaccard similarity in O(1) per comparison
+        instead of O(|set|) for full set intersection.
 
         Args:
             text: Text to fingerprint
+            num_perm: Number of hash permutations (higher = more accurate)
             n: N-gram size
 
         Returns:
-            Set of n-grams
+            MinHash signature array of shape (num_perm,)
         """
         # Normalize text
         text = text.lower()
         text = re.sub(r"[^\w\s]", "", text)
         words = text.split()
 
-        # Generate n-grams
-        ngrams = set()
+        if len(words) < n:
+            return np.full(num_perm, np.iinfo(np.uint64).max, dtype=np.uint64)
+
+        # Initialize signature with max values
+        signature = np.full(num_perm, np.iinfo(np.uint64).max, dtype=np.uint64)
+
+        # num_perm uint64s = num_perm * 8 bytes; SHA-256 = 32 bytes = 4 uint64s
+        num_rounds = (num_perm + 3) // 4
+
         for i in range(len(words) - n + 1):
-            ngram = " ".join(words[i : i + n])
-            ngrams.add(ngram)
+            ngram = " ".join(words[i : i + n]).encode("utf-8")
+            all_bytes = b""
+            for j in range(num_rounds):
+                all_bytes += hashlib.sha256(ngram + j.to_bytes(2, "little")).digest()
+            hashes = np.frombuffer(all_bytes[:num_perm * 8], dtype=np.uint64).copy()
+            signature = np.minimum(signature, hashes)
 
-        return ngrams
+        return signature
 
-    def compute_jaccard_similarity(self, set1: Set[str], set2: Set[str]) -> float:
+    def estimate_jaccard_minhash(self, sig1: np.ndarray, sig2: np.ndarray) -> float:
         """
-        Compute Jaccard similarity between two sets.
+        Estimate Jaccard similarity from two MinHash signatures.
 
         Args:
-            set1: First set
-            set2: Second set
+            sig1: First MinHash signature
+            sig2: Second MinHash signature
 
         Returns:
-            Jaccard similarity (0-1)
+            Estimated Jaccard similarity (0-1)
         """
-        if not set1 or not set2:
-            return 0.0
-
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
-
-        return intersection / union if union > 0 else 0.0
+        return float(np.mean(sig1 == sig2))
 
     def filter_documents(
         self,
         documents: List[Dict[str, Any]],
         dedupe_threshold: float = 0.9,
         verbose: bool = True,
+        max_workers: int = 8,
+        num_perm: int = 128,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Filter documents based on quality criteria.
@@ -162,6 +203,8 @@ class QualityFilter:
             documents: List of document dictionaries
             dedupe_threshold: Jaccard similarity threshold for deduplication
             verbose: Whether to print progress
+            max_workers: Number of parallel workers for fingerprint computation
+            num_perm: Number of MinHash permutations
 
         Returns:
             (passed_documents, rejected_documents) tuple
@@ -169,48 +212,77 @@ class QualityFilter:
         passed = []
         rejected = []
 
-        # Track fingerprints for deduplication
-        fingerprints: List[Tuple[str, Set[str]]] = []
-
+        # Phase 1: Length and meta-reference checks (fast, single pass)
+        candidates = []  # (index, doc) pairs that pass basic checks
+        if verbose:
+            print("Phase 1: Length and meta-reference checks...")
         for i, doc in enumerate(documents):
             rejection_reasons = []
 
-            # Check length
             passes_length, length_reason = self.check_length(doc)
             if not passes_length:
                 rejection_reasons.append(length_reason)
 
-            # Check meta-references
             passes_meta, meta_reason = self.check_meta_references(doc)
             if not passes_meta:
                 rejection_reasons.append(meta_reason)
 
-            # Check for near-duplicates (only if other checks pass)
-            if not rejection_reasons:
-                content = doc.get("content", "")
-                fingerprint = self.compute_text_fingerprint(content)
-
-                for existing_id, existing_fp in fingerprints:
-                    similarity = self.compute_jaccard_similarity(fingerprint, existing_fp)
-                    if similarity >= dedupe_threshold:
-                        rejection_reasons.append(
-                            f"Near-duplicate of {existing_id} (similarity: {similarity:.2f})"
-                        )
-                        break
-
-            # Record result
             if rejection_reasons:
                 doc_rejected = doc.copy()
                 doc_rejected["rejection_reasons"] = rejection_reasons
                 rejected.append(doc_rejected)
             else:
-                passed.append(doc)
-                # Add fingerprint for future deduplication checks
-                fingerprints.append((doc.get("id", str(i)), fingerprint))
+                candidates.append((i, doc))
 
-            if verbose and (i + 1) % 1000 == 0:
+        if verbose:
+            print(f"  {len(candidates)} candidates passed, {len(rejected)} rejected")
+
+        # Phase 2: Compute MinHash signatures in parallel
+        if verbose:
+            print(f"Phase 2: Computing MinHash signatures ({max_workers} workers)...")
+
+        contents = [doc.get("content", "") for _, doc in candidates]
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            signatures = list(tqdm(
+                executor.map(
+                    _compute_minhash_worker,
+                    contents,
+                    [num_perm] * len(contents),
+                    chunksize=100,
+                ),
+                total=len(contents),
+                desc="Fingerprinting",
+                unit="doc",
+                disable=not verbose,
+            ))
+
+        # Phase 3: Deduplicate using MinHash signatures (sequential but O(1) per comparison)
+        if verbose:
+            print("Phase 3: Deduplication...")
+
+        accepted_signatures: List[Tuple[str, np.ndarray]] = []
+
+        for idx, ((orig_i, doc), sig) in enumerate(zip(candidates, signatures)):
+            is_dup = False
+            for existing_id, existing_sig in accepted_signatures:
+                similarity = self.estimate_jaccard_minhash(sig, existing_sig)
+                if similarity >= dedupe_threshold:
+                    doc_rejected = doc.copy()
+                    doc_rejected["rejection_reasons"] = [
+                        f"Near-duplicate of {existing_id} (similarity: {similarity:.2f})"
+                    ]
+                    rejected.append(doc_rejected)
+                    is_dup = True
+                    break
+
+            if not is_dup:
+                passed.append(doc)
+                accepted_signatures.append((doc.get("id", str(orig_i)), sig))
+
+            if verbose and (idx + 1) % 1000 == 0:
                 print(
-                    f"Processed {i + 1}/{len(documents)} documents "
+                    f"  Dedup progress: {idx + 1}/{len(candidates)} "
                     f"({len(passed)} passed, {len(rejected)} rejected)"
                 )
 
